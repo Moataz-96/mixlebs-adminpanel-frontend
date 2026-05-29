@@ -19,6 +19,9 @@ import process from "node:process";
 export function getServerConfig() {
   return {
     nodeEnv: process.env.NODE_ENV,
+    // Base URL of the Django admin API. The admin backend listens on :8001.
+    // Override with DJANGO_BASE_URL in the server environment for preprod/prod.
+    djangoBaseUrl: process.env.DJANGO_BASE_URL ?? "http://localhost:8001",
     // Add server-only values here, e.g.:
     //   databaseUrl: process.env.DATABASE_URL,
     //   stripeSecretKey: process.env.STRIPE_SECRET_KEY,

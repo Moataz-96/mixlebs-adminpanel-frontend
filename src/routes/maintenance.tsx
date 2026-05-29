@@ -1,6 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { Wrench } from "lucide-react";
 import { useT } from "@/lib/i18n";
+import { getHealth } from "@/lib/api/health.functions";
 
 export const Route = createFileRoute("/maintenance")({
   head: () => ({ meta: [{ title: "Maintenance — Mixlebs Admin" }] }),
@@ -9,6 +11,7 @@ export const Route = createFileRoute("/maintenance")({
 
 function Maintenance() {
   const t = useT();
+  const health = useQuery({ queryKey: ["health"], queryFn: () => getHealth() });
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="max-w-md text-center">
@@ -19,9 +22,11 @@ function Maintenance() {
         <p className="mt-2 text-sm text-muted-foreground">
           {t("errors.maintenance.desc")} {t("errors.maintenance.eta")}
         </p>
-        <p className="mt-6 text-xs uppercase tracking-wider text-muted-foreground">
-          {t("errors.maintenance.status")}
-        </p>
+        {health.isSuccess && (
+          <p className="mt-6 text-xs uppercase tracking-wider text-muted-foreground">
+            {t("errors.maintenance.status")}
+          </p>
+        )}
       </div>
     </div>
   );
