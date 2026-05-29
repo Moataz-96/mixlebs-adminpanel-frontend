@@ -20,9 +20,21 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n";
-import { DM_THREADS, DM_MESSAGES, type DmMessage } from "@/lib/mock/content";
+import { parseServerError } from "@/lib/api/error";
+import {
+  getThread,
+  listConversations,
+  sendMessage,
+  editMessage,
+  deleteMessage,
+  toDmThread,
+  toDmMessage,
+  type DmMessage,
+} from "@/lib/api/chat.functions";
 
 export const Route = createFileRoute("/_panel/chat/$userId")({
   head: () => ({ meta: [{ title: "Conversation — Mixlebs Admin" }] }),
@@ -32,30 +44,58 @@ export const Route = createFileRoute("/_panel/chat/$userId")({
 function ChatConversation() {
   const t = useT();
   const { userId } = Route.useParams();
-  const thread = DM_THREADS.find((c) => c.user_id === userId);
+  const queryClient = useQueryClient();
 
-  const [messages, setMessages] = useState<DmMessage[]>(DM_MESSAGES[userId] ?? []);
+  const conversationsQuery = useQuery({
+    queryKey: ["chat-conversations"],
+    queryFn: () => listConversations(),
+    retry: false,
+  });
+  const summary = (conversationsQuery.data ?? []).find((c) => c.user_id === userId);
+  const thread = summary ? toDmThread(summary) : undefined;
+
+  const threadQuery = useQuery({
+    queryKey: ["chat-thread", userId],
+    queryFn: () => getThread({ data: { user_id: userId } }),
+    retry: false,
+  });
+
+  const [messages, setMessages] = useState<DmMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
+
+  useEffect(() => {
+    if (threadQuery.data) {
+      setMessages((threadQuery.data.results ?? []).map((m) => toDmMessage(m, userId)));
+    }
+  }, [threadQuery.data, userId]);
 
   if (!thread) {
     return (
       <>
         <PageHeader title={t("content.chat.title")} />
         <div className="p-6 pt-0">
-          <NotFoundState />
+          {conversationsQuery.isPending ? null : <NotFoundState />}
         </div>
       </>
     );
   }
 
-  function send() {
+  async function send() {
     const body = draft.trim();
     if (!body) return;
-    setMessages((m) => [...m, { id: `m_${Date.now()}`, own: true, body, at: "now", read: false }]);
-    setDraft("");
-    toast.success(t("content.chat.msgSent"));
+    try {
+      const created = await sendMessage({
+        data: { user_id: userId, receiver_id: userId, message: body },
+      });
+      setMessages((m) => [...m, toDmMessage(created, userId)]);
+      setDraft("");
+      await queryClient.invalidateQueries({ queryKey: ["chat-conversations"] });
+      toast.success(t("content.chat.msgSent"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -63,16 +103,26 @@ function ChatConversation() {
       send();
     }
   }
-  function saveEdit(id: string) {
-    setMessages((m) =>
-      m.map((msg) => (msg.id === id ? { ...msg, body: editText, edited: true } : msg)),
-    );
-    setEditingId(null);
-    toast.success(t("content.chat.msgEdited"));
+  async function saveEdit(id: string) {
+    try {
+      await editMessage({ data: { id: Number(id), message: editText } });
+      setMessages((m) =>
+        m.map((msg) => (msg.id === id ? { ...msg, body: editText, edited: true } : msg)),
+      );
+      setEditingId(null);
+      toast.success(t("content.chat.msgEdited"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
-  function remove(id: string) {
-    setMessages((m) => m.filter((msg) => msg.id !== id));
-    toast.success(t("content.chat.msgDeleted"));
+  async function remove(id: string) {
+    try {
+      await deleteMessage({ data: { id: Number(id) } });
+      setMessages((m) => m.filter((msg) => msg.id !== id));
+      toast.success(t("content.chat.msgDeleted"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   return (

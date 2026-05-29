@@ -21,14 +21,21 @@ import {
 import { usePermissions } from "@/components/shared/Can";
 import { usePageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
-import { STORE_REVIEWS, type StoreReview } from "@/lib/mock/content";
+import { useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listStoreReviews,
+  hideStoreReview,
+  unhideStoreReview,
+  toStoreReview,
+  type StoreReview,
+} from "@/lib/api/reviews.functions";
 
 export const Route = createFileRoute("/_panel/reviews/store")({
   head: () => ({ meta: [{ title: "Store reviews — Mixlebs Admin" }] }),
   component: StoreReviewsPage,
 });
-
-const STORES = Array.from(new Set(STORE_REVIEWS.map((r) => r.store)));
 
 function Stars({ rating }: { rating: number }) {
   return (
@@ -50,11 +57,24 @@ function StoreReviewsPage() {
   const canModerate = has("reviews.moderate");
   const canHideNegative = role === "admin";
 
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [rating, setRating] = useState("any");
   const [store, setStore] = useState("all");
   const [status, setStatus] = useState("all");
-  const [rows, setRows] = useState<StoreReview[]>(STORE_REVIEWS);
+  const [rows, setRows] = useState<StoreReview[]>([]);
+
+  const reviewsQuery = useQuery({
+    queryKey: ["store-reviews"],
+    queryFn: () => listStoreReviews({ data: {} }),
+    enabled: canModerate,
+    retry: false,
+  });
+  useEffect(() => {
+    if (reviewsQuery.data) setRows((reviewsQuery.data.results ?? []).map(toStoreReview));
+  }, [reviewsQuery.data]);
+
+  const STORES = useMemo(() => Array.from(new Set(rows.map((r) => r.store))), [rows]);
 
   const filtered = useMemo(
     () =>
@@ -73,13 +93,23 @@ function StoreReviewsPage() {
     [rows, search, rating, store, status],
   );
 
-  const avg = (STORE_REVIEWS.reduce((a, r) => a + r.rating, 0) / STORE_REVIEWS.length).toFixed(2);
+  const avg = rows.length
+    ? (rows.reduce((a, r) => a + r.rating, 0) / rows.length).toFixed(2)
+    : "0.00";
   const hiddenCount = rows.filter((r) => r.hidden).length;
   const negativeCount = rows.filter((r) => r.rating <= 2).length;
 
-  function setHidden(id: string, hidden: boolean) {
-    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, hidden } : r)));
-    toast.success(hidden ? t("content.reviews.hiddenToast") : t("content.reviews.unhiddenToast"));
+  async function setHidden(id: string, hidden: boolean) {
+    try {
+      if (hidden) await hideStoreReview({ data: { id: Number(id) } });
+      else await unhideStoreReview({ data: { id: Number(id) } });
+      setRows((rs) => rs.map((r) => (r.id === id ? { ...r, hidden } : r)));
+      await queryClient.invalidateQueries({ queryKey: ["store-reviews"] });
+      toast.success(hidden ? t("content.reviews.hiddenToast") : t("content.reviews.unhiddenToast"));
+    } catch (err) {
+      // STORE rating<=2 hide -> 403 negative-review guard; surface via toaster.
+      toast.error(parseServerError(err).message);
+    }
   }
 
   const columns: Column<StoreReview>[] = [
@@ -227,7 +257,7 @@ function StoreReviewsPage() {
           />
           <KpiCard
             label={t("content.reviews.kpiTotal")}
-            value={STORE_REVIEWS.length}
+            value={rows.length}
             icon={<Star className="h-5 w-5" />}
           />
           <KpiCard

@@ -32,7 +32,16 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { ADMIN_CITIES, type AdminCity } from "@/lib/mock/admin";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listCities,
+  createCity,
+  updateCity,
+  deleteCity,
+  toAdminCity,
+  type AdminCity,
+} from "@/lib/api/locations.functions";
 
 export const Route = createFileRoute("/_panel/admin/locations/cities")({
   head: () => ({ meta: [{ title: "Cities — Mixlebs Admin" }] }),
@@ -51,6 +60,7 @@ function CitiesPage() {
   const t = useT();
   const { has } = usePermissions();
   const state = usePageState();
+  const queryClient = useQueryClient();
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<AdminCity | null>(null);
@@ -60,14 +70,25 @@ function CitiesPage() {
     defaultValues: { name_en: "", name_ar: "", code: "", region: "" },
   });
 
+  const citiesQuery = useQuery({
+    queryKey: ["cities"],
+    queryFn: () => listCities(),
+    enabled: has("locations.view"),
+    retry: false,
+  });
+  const cities = useMemo(
+    () => (citiesQuery.data?.results ?? []).map(toAdminCity),
+    [citiesQuery.data],
+  );
+
   const rows = useMemo(
     () =>
-      ADMIN_CITIES.filter(
+      cities.filter(
         (c) =>
           !q ||
           `${c.name_en} ${c.name_ar} ${c.code} ${c.region}`.toLowerCase().includes(q.toLowerCase()),
       ),
-    [q],
+    [cities, q],
   );
 
   if (!has("locations.view")) {
@@ -92,10 +113,30 @@ function CitiesPage() {
     form.reset({ name_en: c.name_en, name_ar: c.name_ar, code: c.code, region: c.region });
     setOpen(true);
   }
-  function onSubmit(values: Values) {
-    toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
-    setOpen(false);
-    void values;
+  async function onSubmit(values: Values) {
+    const body = { name: values.name_en, code: values.code };
+    try {
+      if (editing) {
+        await updateCity({ data: { id: Number(editing.id), body } });
+      } else {
+        await createCity({ data: body });
+      }
+      await queryClient.invalidateQueries({ queryKey: ["cities"] });
+      toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
+      setOpen(false);
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
+  }
+
+  async function removeCity(c: AdminCity) {
+    try {
+      await deleteCity({ data: { id: Number(c.id) } });
+      await queryClient.invalidateQueries({ queryKey: ["cities"] });
+      toast.success(t("admin.common.deletedToast"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   const columns: Column<AdminCity>[] = [
@@ -150,13 +191,13 @@ function CitiesPage() {
       <div className="grid gap-4 md:grid-cols-2">
         <KpiCard
           label={t("admin.locations.cities.title")}
-          value={ADMIN_CITIES.length}
+          value={cities.length}
           icon={<MapPin className="h-5 w-5" />}
           accent
         />
         <KpiCard
           label={t("admin.locations.colRegion")}
-          value={new Set(ADMIN_CITIES.map((c) => c.region)).size}
+          value={new Set(cities.map((c) => c.region)).size}
         />
       </div>
 
@@ -214,7 +255,7 @@ function CitiesPage() {
                           title={t("admin.locations.cities.deleteTitle")}
                           confirmLabel={t("admin.common.delete")}
                           typeToConfirm={c.code}
-                          onConfirm={() => toast.success(t("admin.common.deletedToast"))}
+                          onConfirm={() => removeCity(c)}
                           trigger={
                             <DropdownMenuItem
                               onSelect={(e) => e.preventDefault()}

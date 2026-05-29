@@ -35,18 +35,30 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import { Can } from "@/components/shared/Can";
 import { useApp } from "@/lib/app-context";
 import { useT } from "@/lib/i18n";
+import { parseServerError } from "@/lib/api/error";
 import {
-  SUPPORT_INBOX,
-  STAFF_MEMBERS,
-  RECENT_ORDERS,
+  getSupportSession,
+  pickupSession,
+  sendSessionMessage,
+  closeSession,
+  toSupportSession,
+  toSessionMessage,
   type SupportSession as Session,
   type SessionMessage,
   type SupportStatus,
-} from "@/lib/mock/content";
+} from "@/lib/api/support.functions";
+
+// FE-only quick pickers (the FROZEN UI offers staff names / recent orders by
+// label; transfer-by-staff and order-linking need id pickers the BE contract
+// does not surface here, so these remain demo affordances).
+const STAFF_MEMBERS = ["Lara Khoury", "Faris Aoun", "Karim Atlas"];
+const RECENT_ORDERS = ["MX-4501", "MX-4498", "MX-4490"];
 
 export const Route = createFileRoute("/_panel/support/$sessionId")({
   head: () => ({ meta: [{ title: "Support session — Mixlebs Admin" }] }),
@@ -57,11 +69,34 @@ function SupportSessionPage() {
   const t = useT();
   const { role } = useApp();
   const { sessionId } = Route.useParams();
-  const base = SUPPORT_INBOX.find((x) => x.id === sessionId);
+  const queryClient = useQueryClient();
 
-  const [session, setSession] = useState<Session | null>(base ?? null);
-  const [messages, setMessages] = useState<SessionMessage[]>(base?.messages ?? []);
+  const detailQuery = useQuery({
+    queryKey: ["support-session", sessionId],
+    queryFn: () => getSupportSession({ data: { id: Number(sessionId) } }),
+    retry: false,
+  });
+
+  const [session, setSession] = useState<Session | null>(null);
+  const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [draft, setDraft] = useState("");
+
+  useEffect(() => {
+    if (detailQuery.data) {
+      const d = detailQuery.data;
+      setSession(toSupportSession(d.session, d.messages ?? []));
+      setMessages((d.messages ?? []).map(toSessionMessage));
+    }
+  }, [detailQuery.data]);
+
+  if (!session && detailQuery.isPending) {
+    return (
+      <>
+        <PageHeader title={t("content.session.title")} />
+        <div className="p-6 pt-0" />
+      </>
+    );
+  }
 
   if (!session) {
     return (
@@ -81,22 +116,17 @@ function SupportSessionPage() {
     .join("");
   const isUnassigned = session.status === "OPEN" && !session.assigned_to;
 
-  function send() {
+  async function send() {
     const body = draft.trim();
     if (!body) return;
-    setMessages((m) => [
-      ...m,
-      {
-        id: `sm_${Date.now()}`,
-        sender_role: "STAFF",
-        message: body,
-        type: "text",
-        is_read: false,
-        at: "now",
-      },
-    ]);
-    setDraft("");
-    toast.success(t("content.session.msgSent"));
+    try {
+      const created = await sendSessionMessage({ data: { id: Number(sessionId), message: body } });
+      setMessages((m) => [...m, toSessionMessage(created)]);
+      setDraft("");
+      toast.success(t("content.session.msgSent"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -295,9 +325,17 @@ function SupportSessionPage() {
                 <Can perm="chat.support_pickup">
                   <Button
                     className="w-full justify-start gap-2 bg-gradient-primary text-primary-foreground shadow-glow"
-                    onClick={() => {
-                      setStatus("ASSIGNED", { assigned_to: "me", opened_at: "now" });
-                      toast.success(t("content.session.pickedUp"));
+                    onClick={async () => {
+                      try {
+                        await pickupSession({ data: { id: Number(sessionId) } });
+                        setStatus("ASSIGNED", { assigned_to: "me", opened_at: "now" });
+                        await queryClient.invalidateQueries({
+                          queryKey: ["support-session", sessionId],
+                        });
+                        toast.success(t("content.session.pickedUp"));
+                      } catch (err) {
+                        toast.error(parseServerError(err).message);
+                      }
                     }}
                   >
                     <UserCheck className="h-4 w-4" /> {t("content.session.pickUp")}
@@ -321,9 +359,17 @@ function SupportSessionPage() {
                   title={t("content.session.closeTitle")}
                   description={t("content.session.closeDesc")}
                   confirmLabel={t("content.session.close")}
-                  onConfirm={() => {
-                    setStatus("AWAITING_FEEDBACK", { awaiting_since: "now" });
-                    toast.success(t("content.session.closed"));
+                  onConfirm={async () => {
+                    try {
+                      await closeSession({ data: { id: Number(sessionId) } });
+                      setStatus("AWAITING_FEEDBACK", { awaiting_since: "now" });
+                      await queryClient.invalidateQueries({
+                        queryKey: ["support-session", sessionId],
+                      });
+                      toast.success(t("content.session.closed"));
+                    } catch (err) {
+                      toast.error(parseServerError(err).message);
+                    }
                   }}
                 />
               </Can>
@@ -363,9 +409,17 @@ function SupportSessionPage() {
                 description={t("content.session.markSpamDesc")}
                 confirmLabel={t("content.session.markSpam")}
                 destructive
-                onConfirm={() => {
-                  setStatus("CLOSED", { closed_at: "now" });
-                  toast.success(t("content.session.markedSpam"));
+                onConfirm={async () => {
+                  try {
+                    await closeSession({ data: { id: Number(sessionId) } });
+                    setStatus("CLOSED", { closed_at: "now" });
+                    await queryClient.invalidateQueries({
+                      queryKey: ["support-session", sessionId],
+                    });
+                    toast.success(t("content.session.markedSpam"));
+                  } catch (err) {
+                    toast.error(parseServerError(err).message);
+                  }
                 }}
               />
 

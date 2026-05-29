@@ -13,7 +13,7 @@ import { useT } from "@/lib/i18n";
 // screen intentionally retains its existing static state from mock/account.ts
 // (owned by other phases) until a sessions surface is built; the revoke / sign-
 // out-everywhere actions remain UI affordances (toast only).
-import { ACCOUNT_SESSIONS, type SessionRow } from "@/lib/mock/account";
+import { ACCOUNT_SESSIONS, type SessionRow } from "@/lib/constants";
 
 export const Route = createFileRoute("/_panel/account/sessions")({
   head: () => ({ meta: [{ title: "Sessions — Mixlebs Admin" }] }),

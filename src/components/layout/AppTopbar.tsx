@@ -43,7 +43,8 @@ import { Badge } from "@/components/ui/badge";
 import { useApp, type Role } from "@/lib/app-context";
 import { usePermissions } from "@/components/shared/Can";
 import { useT } from "@/lib/i18n";
-import { NOTIFICATIONS } from "@/lib/mock-data";
+import { useQuery } from "@tanstack/react-query";
+import { listNotifications, toNotifItem } from "@/lib/api/notifications.functions";
 
 export function AppTopbar() {
   const {
@@ -63,6 +64,20 @@ export function AppTopbar() {
   const { has } = usePermissions();
   const [openNotif, setOpenNotif] = useState(false);
   const [openPalette, setOpenPalette] = useState(false);
+  const notificationsQuery = useQuery({
+    queryKey: ["notifications"],
+    queryFn: () => listNotifications({ data: {} }),
+    retry: false,
+  });
+  // Project the inbox into the topbar dropdown's row shape (read == opened,
+  // at == created_at).
+  const NOTIFICATIONS = (notificationsQuery.data?.results ?? []).map(toNotifItem).map((n) => ({
+    id: n.id,
+    title: n.title,
+    body: n.body,
+    at: n.created_at,
+    read: n.is_opened,
+  }));
   const unread = NOTIFICATIONS.filter((n) => !n.read).length;
   const currentStore = stores.find((s) => s.id === currentStoreId);
 

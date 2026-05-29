@@ -11,7 +11,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useApp } from "@/lib/app-context";
 import { useT } from "@/lib/i18n";
-import { CHANNEL_SETTINGS, type ChannelSetting, type CommChannel } from "@/lib/mock/content";
+import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
+import {
+  listChannels,
+  toChannelSetting,
+  type ChannelSetting,
+  type CommChannel,
+} from "@/lib/api/templates.functions";
 
 export const Route = createFileRoute("/_panel/communications/channels")({
   head: () => ({ meta: [{ title: "Channels — Mixlebs Admin" }] }),
@@ -32,7 +39,18 @@ const LABEL: Record<CommChannel, string> = {
 function ChannelsPage() {
   const t = useT();
   const { role } = useApp();
-  const [rows, setRows] = useState<ChannelSetting[]>(CHANNEL_SETTINGS);
+  const [rows, setRows] = useState<ChannelSetting[]>([]);
+
+  // Channels are a fixed enum (no per-channel config model) — ENTRY 013.
+  const channelsQuery = useQuery({
+    queryKey: ["channels"],
+    queryFn: () => listChannels(),
+    enabled: role === "admin",
+    retry: false,
+  });
+  useEffect(() => {
+    if (channelsQuery.data) setRows((channelsQuery.data.channels ?? []).map(toChannelSetting));
+  }, [channelsQuery.data]);
 
   function setEnabled(key: CommChannel, enabled: boolean) {
     setRows((rs) => rs.map((r) => (r.key === key ? { ...r, enabled } : r)));

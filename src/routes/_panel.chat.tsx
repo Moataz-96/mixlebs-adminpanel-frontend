@@ -10,7 +10,8 @@ import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { usePageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
-import { DM_THREADS, type DmThread } from "@/lib/mock/content";
+import { useQuery } from "@tanstack/react-query";
+import { listConversations, toDmThread, type DmThread } from "@/lib/api/chat.functions";
 
 export const Route = createFileRoute("/_panel/chat")({
   head: () => ({ meta: [{ title: "Direct messages — Mixlebs Admin" }] }),
@@ -23,14 +24,21 @@ function ChatPage() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
 
+  const conversationsQuery = useQuery({
+    queryKey: ["chat-conversations"],
+    queryFn: () => listConversations(),
+    retry: false,
+  });
+  const threads: DmThread[] = (conversationsQuery.data ?? []).map(toDmThread);
+
   const filtered = useMemo(
     () =>
-      DM_THREADS.filter(
+      threads.filter(
         (c) => !search || `${c.name} ${c.last}`.toLowerCase().includes(search.toLowerCase()),
       ),
-    [search],
+    [threads, search],
   );
-  const unread = DM_THREADS.reduce((a, c) => a + c.unread, 0);
+  const unread = threads.reduce((a, c) => a + c.unread, 0);
 
   const columns: Column<DmThread>[] = [
     {
@@ -86,7 +94,7 @@ function ChatPage() {
         <div className="mb-6 grid gap-4 md:grid-cols-3">
           <KpiCard
             label={t("content.chat.title")}
-            value={DM_THREADS.length}
+            value={threads.length}
             icon={<MessageSquare className="h-5 w-5" />}
             accent
           />
@@ -97,7 +105,7 @@ function ChatPage() {
           />
           <KpiCard
             label={t("content.chat.online")}
-            value={DM_THREADS.filter((c) => c.online).length}
+            value={threads.filter((c) => c.online).length}
           />
         </div>
 

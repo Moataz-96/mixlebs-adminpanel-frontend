@@ -50,14 +50,20 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useApp } from "@/lib/app-context";
 import { useT } from "@/lib/i18n";
+import { useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseServerError } from "@/lib/api/error";
 import {
-  COMM_TEMPLATES,
+  listTemplates,
+  createTemplate,
+  updateTemplate,
+  toCommTemplate,
   COMM_TYPES,
   COMM_CHANNELS,
   COMM_PLACEHOLDERS,
   type CommTemplate,
   type CommChannel,
-} from "@/lib/mock/content";
+} from "@/lib/api/templates.functions";
 
 export const Route = createFileRoute("/_panel/communications/templates")({
   head: () => ({ meta: [{ title: "Communication templates — Mixlebs Admin" }] }),
@@ -75,8 +81,19 @@ const PHONE_RE = /^\+?[1-9]\d{6,14}$/;
 function TemplatesPage() {
   const t = useT();
   const { role } = useApp();
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
-  const [rows, setRows] = useState<CommTemplate[]>(COMM_TEMPLATES);
+  const [rows, setRows] = useState<CommTemplate[]>([]);
+
+  const templatesQuery = useQuery({
+    queryKey: ["templates"],
+    queryFn: () => listTemplates({ data: {} }),
+    enabled: role === "admin",
+    retry: false,
+  });
+  useEffect(() => {
+    if (templatesQuery.data) setRows((templatesQuery.data.results ?? []).map(toCommTemplate));
+  }, [templatesQuery.data]);
 
   const filtered = useMemo(
     () =>
@@ -86,17 +103,20 @@ function TemplatesPage() {
     [rows, search],
   );
 
-  function toggleEnabled(id: string) {
-    setRows((rs) =>
-      rs.map((r) => {
-        if (r.id !== id) return r;
-        const next = !r.is_enabled;
-        toast.success(
-          next ? t("content.templates.enabledToast") : t("content.templates.disabledToast"),
-        );
-        return { ...r, is_enabled: next };
-      }),
-    );
+  async function toggleEnabled(id: string) {
+    const cur = rows.find((r) => r.id === id);
+    if (!cur) return;
+    const next = !cur.is_enabled;
+    try {
+      await updateTemplate({ data: { id: Number(id), body: { is_enabled: next } } });
+      setRows((rs) => rs.map((r) => (r.id === id ? { ...r, is_enabled: next } : r)));
+      await queryClient.invalidateQueries({ queryKey: ["templates"] });
+      toast.success(
+        next ? t("content.templates.enabledToast") : t("content.templates.disabledToast"),
+      );
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   const columns: Column<CommTemplate>[] = [
@@ -297,6 +317,7 @@ function TemplateEditorDialog({
   trigger: React.ReactNode;
 }) {
   const t = useT();
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const en = template?.translations.find((x) => x.lang === "en");
   const ar = template?.translations.find((x) => x.lang === "ar");
@@ -327,9 +348,29 @@ function TemplateEditorDialog({
     toast.success(t("content.templates.variableInserted"));
   }
 
-  function onSubmit() {
-    toast.success(t("content.templates.saved"));
-    setOpen(false);
+  async function onSubmit(values: EditorValues) {
+    const translations = [
+      { language_code: "en", title: values.title_en, content: values.content_en },
+      { language_code: "ar", title: values.title_ar, content: values.content_ar },
+    ].filter((tr) => tr.title.trim() !== "" || tr.content.trim() !== "");
+    const body = {
+      type: values.type,
+      channel: values.channel,
+      is_enabled: values.is_enabled,
+      translations,
+    };
+    try {
+      if (template) {
+        await updateTemplate({ data: { id: Number(template.id), body } });
+      } else {
+        await createTemplate({ data: body });
+      }
+      await queryClient.invalidateQueries({ queryKey: ["templates"] });
+      toast.success(t("content.templates.saved"));
+      setOpen(false);
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   return (

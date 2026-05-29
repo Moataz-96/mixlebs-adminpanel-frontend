@@ -26,7 +26,7 @@ import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n";
 import { parseServerError } from "@/lib/api/error";
 import { getPreferences, updatePreferences } from "@/lib/api/account.functions";
-import { PREF_LOCATIONS, PREF_LANGUAGES, PREF_TIMEZONES } from "@/lib/mock/account";
+import { PREF_LOCATIONS, PREF_LANGUAGES, PREF_TIMEZONES } from "@/lib/constants";
 
 export const Route = createFileRoute("/_panel/account/preferences")({
   head: () => ({ meta: [{ title: "Preferences — Mixlebs Admin" }] }),

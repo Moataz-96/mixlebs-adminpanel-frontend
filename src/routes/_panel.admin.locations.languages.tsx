@@ -31,7 +31,16 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { ADMIN_LANGUAGES, type AdminLanguage } from "@/lib/mock/admin";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listLanguages,
+  createLanguage,
+  updateLanguage,
+  deleteLanguage,
+  toAdminLanguage,
+  type AdminLanguage,
+} from "@/lib/api/locations.functions";
 
 export const Route = createFileRoute("/_panel/admin/locations/languages")({
   head: () => ({ meta: [{ title: "Languages — Mixlebs Admin" }] }),
@@ -48,6 +57,7 @@ function LanguagesPage() {
   const t = useT();
   const { has } = usePermissions();
   const state = usePageState();
+  const queryClient = useQueryClient();
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<AdminLanguage | null>(null);
@@ -57,12 +67,23 @@ function LanguagesPage() {
     defaultValues: { code: "", name: "" },
   });
 
+  const languagesQuery = useQuery({
+    queryKey: ["languages"],
+    queryFn: () => listLanguages(),
+    enabled: has("locations.view"),
+    retry: false,
+  });
+  const languages = useMemo(
+    () => (languagesQuery.data?.results ?? []).map(toAdminLanguage),
+    [languagesQuery.data],
+  );
+
   const rows = useMemo(
     () =>
-      ADMIN_LANGUAGES.filter(
+      languages.filter(
         (l) => !q || `${l.code} ${l.name}`.toLowerCase().includes(q.toLowerCase()),
       ),
-    [q],
+    [languages, q],
   );
 
   if (!has("locations.view")) {
@@ -87,10 +108,30 @@ function LanguagesPage() {
     form.reset({ code: l.code, name: l.name });
     setOpen(true);
   }
-  function onSubmit(values: Values) {
-    toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
-    setOpen(false);
-    void values;
+  async function onSubmit(values: Values) {
+    const body = { name: values.name, code: values.code };
+    try {
+      if (editing) {
+        await updateLanguage({ data: { id: Number(editing.id), body } });
+      } else {
+        await createLanguage({ data: body });
+      }
+      await queryClient.invalidateQueries({ queryKey: ["languages"] });
+      toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
+      setOpen(false);
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
+  }
+
+  async function removeLanguage(l: AdminLanguage) {
+    try {
+      await deleteLanguage({ data: { id: Number(l.id) } });
+      await queryClient.invalidateQueries({ queryKey: ["languages"] });
+      toast.success(t("admin.common.deletedToast"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   const columns: Column<AdminLanguage>[] = [
@@ -128,7 +169,7 @@ function LanguagesPage() {
       <div className="grid gap-4 md:grid-cols-2">
         <KpiCard
           label={t("admin.locations.languages.title")}
-          value={ADMIN_LANGUAGES.length}
+          value={languages.length}
           icon={<LangIcon className="h-5 w-5" />}
           accent
         />
@@ -188,7 +229,7 @@ function LanguagesPage() {
                           title={t("admin.locations.languages.deleteTitle")}
                           confirmLabel={t("admin.common.delete")}
                           typeToConfirm={l.code}
-                          onConfirm={() => toast.success(t("admin.common.deletedToast"))}
+                          onConfirm={() => removeLanguage(l)}
                           trigger={
                             <DropdownMenuItem
                               onSelect={(e) => e.preventDefault()}

@@ -32,7 +32,16 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { ADMIN_OPTIONS, type AdminOption } from "@/lib/mock/admin";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listOptions,
+  createOption,
+  updateOption,
+  deleteOption,
+  toAdminOption,
+  type AdminOption,
+} from "@/lib/api/options.functions";
 
 export const Route = createFileRoute("/_panel/admin/options")({
   head: () => ({ meta: [{ title: "Options — Mixlebs Admin" }] }),
@@ -51,6 +60,7 @@ function OptionsPage() {
   const t = useT();
   const { has } = usePermissions();
   const state = usePageState();
+  const queryClient = useQueryClient();
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<AdminOption | null>(null);
@@ -60,16 +70,27 @@ function OptionsPage() {
     defaultValues: { event: "", identifier: "", name_en: "", name_ar: "" },
   });
 
+  const optionsQuery = useQuery({
+    queryKey: ["options"],
+    queryFn: () => listOptions({ data: {} }),
+    enabled: has("options.view"),
+    retry: false,
+  });
+  const options = useMemo(
+    () => (optionsQuery.data?.results ?? []).map(toAdminOption),
+    [optionsQuery.data],
+  );
+
   const rows = useMemo(
     () =>
-      ADMIN_OPTIONS.filter(
+      options.filter(
         (o) =>
           !q ||
           `${o.event} ${o.identifier} ${o.name_en} ${o.name_ar}`
             .toLowerCase()
             .includes(q.toLowerCase()),
       ),
-    [q],
+    [options, q],
   );
 
   if (!has("options.view")) {
@@ -96,10 +117,29 @@ function OptionsPage() {
     });
     setOpen(true);
   }
-  function onSubmit(values: Values) {
-    toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
-    setOpen(false);
-    void values;
+  async function onSubmit(values: Values) {
+    try {
+      if (editing) {
+        await updateOption({ data: { id: Number(editing.id), body: values } });
+      } else {
+        await createOption({ data: values });
+      }
+      await queryClient.invalidateQueries({ queryKey: ["options"] });
+      toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
+      setOpen(false);
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
+  }
+
+  async function removeOption(o: AdminOption) {
+    try {
+      await deleteOption({ data: { id: Number(o.id) } });
+      await queryClient.invalidateQueries({ queryKey: ["options"] });
+      toast.success(t("admin.common.deletedToast"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   const columns: Column<AdminOption>[] = [
@@ -151,13 +191,13 @@ function OptionsPage() {
       <div className="grid gap-4 md:grid-cols-2">
         <KpiCard
           label={t("admin.options.kTotal")}
-          value={ADMIN_OPTIONS.length}
+          value={options.length}
           icon={<Sliders className="h-5 w-5" />}
           accent
         />
         <KpiCard
           label={t("admin.options.kEvents")}
-          value={new Set(ADMIN_OPTIONS.map((o) => o.event)).size}
+          value={new Set(options.map((o) => o.event)).size}
           icon={<Calendar className="h-5 w-5" />}
         />
       </div>
@@ -216,7 +256,7 @@ function OptionsPage() {
                           title={t("admin.options.deleteTitle")}
                           confirmLabel={t("admin.common.delete")}
                           typeToConfirm={o.identifier}
-                          onConfirm={() => toast.success(t("admin.common.deletedToast"))}
+                          onConfirm={() => removeOption(o)}
                           trigger={
                             <DropdownMenuItem
                               onSelect={(e) => e.preventDefault()}

@@ -11,7 +11,8 @@ import { useT } from "@/lib/i18n";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { SEARCH_TERMS, type SearchTerm } from "@/lib/mock/admin";
+import { useQuery } from "@tanstack/react-query";
+import { listSearchHistory, type SearchTerm } from "@/lib/api/search_history.functions";
 
 export const Route = createFileRoute("/_panel/admin/search-history")({
   head: () => ({ meta: [{ title: "Search history — Mixlebs Admin" }] }),
@@ -27,16 +28,26 @@ function SearchHistoryPage() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
 
+  // ENTRY 014 — search query strings are not persisted; the endpoint returns an
+  // empty paginated envelope, so the screen renders an empty state.
+  const searchQuery = useQuery({
+    queryKey: ["search-history"],
+    queryFn: () => listSearchHistory(),
+    enabled: role === "admin",
+    retry: false,
+  });
+  const terms: SearchTerm[] = searchQuery.data?.results ?? [];
+
   const rows = useMemo(
     () =>
-      SEARCH_TERMS.filter((s) => {
+      terms.filter((s) => {
         if (q && !s.query.toLowerCase().includes(q.toLowerCase())) return false;
         if (withResults && s.avg_results === 0) return false;
         if (dateFrom && s.last_searched.slice(0, 10) < dateFrom) return false;
         if (dateTo && s.last_searched.slice(0, 10) > dateTo) return false;
         return true;
       }),
-    [q, withResults, dateFrom, dateTo],
+    [terms, q, withResults, dateFrom, dateTo],
   );
 
   if (role !== "admin") {
@@ -51,8 +62,8 @@ function SearchHistoryPage() {
     );
   }
 
-  const totalSearches = SEARCH_TERMS.reduce((a, s) => a + s.count, 0);
-  const zeroResults = SEARCH_TERMS.filter((s) => s.avg_results === 0).length;
+  const totalSearches = terms.reduce((a, s) => a + s.count, 0);
+  const zeroResults = terms.filter((s) => s.avg_results === 0).length;
   const fmt = (n: number) => n.toLocaleString();
 
   const columns: Column<SearchTerm>[] = [
@@ -113,7 +124,7 @@ function SearchHistoryPage() {
         />
         <KpiCard
           label={t("admin.searchHistory.kUniqueQueries")}
-          value={SEARCH_TERMS.length}
+          value={terms.length}
           icon={<Hash className="h-5 w-5" />}
         />
         <KpiCard

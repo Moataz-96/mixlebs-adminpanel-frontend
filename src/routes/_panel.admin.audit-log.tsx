@@ -25,12 +25,13 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { useQuery } from "@tanstack/react-query";
 import {
-  AUDIT_ENTRIES,
+  listAuditLog,
   RESOURCE_METHODS,
   type AuditEntry,
   type ResourceMethod,
-} from "@/lib/mock/admin";
+} from "@/lib/api/audit.functions";
 
 export const Route = createFileRoute("/_panel/admin/audit-log")({
   head: () => ({ meta: [{ title: "Audit log — Mixlebs Admin" }] }),
@@ -67,8 +68,18 @@ function AuditLogPage() {
   const [dateTo, setDateTo] = useState("");
   const [requestId, setRequestId] = useState("");
 
+  // ENTRY 012 — no DB-backed endpoint-logging model; the endpoint returns an
+  // empty paginated envelope, so the screen renders an empty state.
+  const auditQuery = useQuery({
+    queryKey: ["audit-log"],
+    queryFn: () => listAuditLog(),
+    enabled: has("audit_log.view"),
+    retry: false,
+  });
+  const entries: AuditEntry[] = auditQuery.data?.results ?? [];
+
   const rows = useMemo(() => {
-    return AUDIT_ENTRIES.filter((e) => {
+    return entries.filter((e) => {
       if (q && !`${e.url} ${e.user}`.toLowerCase().includes(q.toLowerCase())) return false;
       if (user && !e.user.toLowerCase().includes(user.toLowerCase())) return false;
       if (method !== "all" && e.method !== method) return false;
@@ -92,9 +103,9 @@ function AuditLogPage() {
   }
 
   const avgLatency = Math.round(
-    AUDIT_ENTRIES.reduce((a, e) => a + e.latency_ms, 0) / Math.max(1, AUDIT_ENTRIES.length),
+    entries.reduce((a, e) => a + e.latency_ms, 0) / Math.max(1, entries.length),
   );
-  const errors = AUDIT_ENTRIES.filter((e) => e.status >= 500).length;
+  const errors = entries.filter((e) => e.status >= 500).length;
 
   const columns: Column<AuditEntry>[] = [
     {
@@ -186,7 +197,7 @@ function AuditLogPage() {
       <div className="grid gap-4 md:grid-cols-3">
         <KpiCard
           label={t("admin.auditLog.kTotal")}
-          value={AUDIT_ENTRIES.length}
+          value={entries.length}
           icon={<ScrollText className="h-5 w-5" />}
           accent
         />

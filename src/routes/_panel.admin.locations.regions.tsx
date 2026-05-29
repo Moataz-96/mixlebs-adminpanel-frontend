@@ -8,7 +8,8 @@ import { usePermissions } from "@/components/shared/Can";
 import { usePageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
-import { ADMIN_REGIONS, type AdminRegion } from "@/lib/mock/admin";
+import { useQuery } from "@tanstack/react-query";
+import { listRegions, toAdminRegion, type AdminRegion } from "@/lib/api/locations.functions";
 
 export const Route = createFileRoute("/_panel/admin/locations/regions")({
   head: () => ({ meta: [{ title: "Regions — Mixlebs Admin" }] }),
@@ -19,6 +20,14 @@ function RegionsPage() {
   const t = useT();
   const { has } = usePermissions();
   const state = usePageState();
+
+  const regionsQuery = useQuery({
+    queryKey: ["regions"],
+    queryFn: () => listRegions(),
+    enabled: has("locations.view"),
+    retry: false,
+  });
+  const regions: AdminRegion[] = (regionsQuery.data?.results ?? []).map(toAdminRegion);
 
   if (!has("locations.view")) {
     return (
@@ -81,13 +90,13 @@ function RegionsPage() {
       <div className="grid gap-4 md:grid-cols-2">
         <KpiCard
           label={t("admin.locations.regions.title")}
-          value={ADMIN_REGIONS.length}
+          value={regions.length}
           icon={<Map className="h-5 w-5" />}
           accent
         />
         <KpiCard
           label={t("admin.locations.regions.colActive")}
-          value={ADMIN_REGIONS.filter((r) => r.active).length}
+          value={regions.filter((r) => r.active).length}
         />
       </div>
 
@@ -101,12 +110,7 @@ function RegionsPage() {
             </div>
           }
         >
-          <DataTable
-            data={ADMIN_REGIONS}
-            columns={columns}
-            getRowId={(r) => r.id}
-            paginate={false}
-          />
+          <DataTable data={regions} columns={columns} getRowId={(r) => r.id} paginate={false} />
         </PageStates>
       </div>
     </div>

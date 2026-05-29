@@ -31,7 +31,16 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { ADMIN_CURRENCIES, type AdminCurrency } from "@/lib/mock/admin";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listCurrencies,
+  createCurrency,
+  updateCurrency,
+  deleteCurrency,
+  toAdminCurrency,
+  type AdminCurrency,
+} from "@/lib/api/locations.functions";
 
 export const Route = createFileRoute("/_panel/admin/locations/currencies")({
   head: () => ({ meta: [{ title: "Currencies — Mixlebs Admin" }] }),
@@ -49,6 +58,7 @@ function CurrenciesPage() {
   const t = useT();
   const { has } = usePermissions();
   const state = usePageState();
+  const queryClient = useQueryClient();
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<AdminCurrency | null>(null);
@@ -58,12 +68,23 @@ function CurrenciesPage() {
     defaultValues: { name_en: "", name_ar: "", code: "" },
   });
 
+  const currenciesQuery = useQuery({
+    queryKey: ["currencies"],
+    queryFn: () => listCurrencies(),
+    enabled: has("locations.view"),
+    retry: false,
+  });
+  const currencies = useMemo(
+    () => (currenciesQuery.data?.results ?? []).map(toAdminCurrency),
+    [currenciesQuery.data],
+  );
+
   const rows = useMemo(
     () =>
-      ADMIN_CURRENCIES.filter(
+      currencies.filter(
         (c) => !q || `${c.name_en} ${c.name_ar} ${c.code}`.toLowerCase().includes(q.toLowerCase()),
       ),
-    [q],
+    [currencies, q],
   );
 
   if (!has("locations.view")) {
@@ -88,10 +109,30 @@ function CurrenciesPage() {
     form.reset({ name_en: c.name_en, name_ar: c.name_ar, code: c.code });
     setOpen(true);
   }
-  function onSubmit(values: Values) {
-    toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
-    setOpen(false);
-    void values;
+  async function onSubmit(values: Values) {
+    const body = { name: values.name_en, code: values.code };
+    try {
+      if (editing) {
+        await updateCurrency({ data: { id: Number(editing.id), body } });
+      } else {
+        await createCurrency({ data: body });
+      }
+      await queryClient.invalidateQueries({ queryKey: ["currencies"] });
+      toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
+      setOpen(false);
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
+  }
+
+  async function removeCurrency(c: AdminCurrency) {
+    try {
+      await deleteCurrency({ data: { id: Number(c.id) } });
+      await queryClient.invalidateQueries({ queryKey: ["currencies"] });
+      toast.success(t("admin.common.deletedToast"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   const columns: Column<AdminCurrency>[] = [
@@ -136,7 +177,7 @@ function CurrenciesPage() {
       <div className="grid gap-4 md:grid-cols-2">
         <KpiCard
           label={t("admin.locations.currencies.title")}
-          value={ADMIN_CURRENCIES.length}
+          value={currencies.length}
           icon={<Coins className="h-5 w-5" />}
           accent
         />
@@ -196,7 +237,7 @@ function CurrenciesPage() {
                           title={t("admin.locations.currencies.deleteTitle")}
                           confirmLabel={t("admin.common.delete")}
                           typeToConfirm={c.code}
-                          onConfirm={() => toast.success(t("admin.common.deletedToast"))}
+                          onConfirm={() => removeCurrency(c)}
                           trigger={
                             <DropdownMenuItem
                               onSelect={(e) => e.preventDefault()}

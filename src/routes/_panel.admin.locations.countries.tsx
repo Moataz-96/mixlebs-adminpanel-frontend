@@ -32,7 +32,16 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { ADMIN_COUNTRIES, type AdminCountry } from "@/lib/mock/admin";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listCountries,
+  createCountry,
+  updateCountry,
+  deleteCountry,
+  toAdminCountry,
+  type AdminCountry,
+} from "@/lib/api/locations.functions";
 
 export const Route = createFileRoute("/_panel/admin/locations/countries")({
   head: () => ({ meta: [{ title: "Countries — Mixlebs Admin" }] }),
@@ -51,6 +60,7 @@ function CountriesPage() {
   const t = useT();
   const { has } = usePermissions();
   const state = usePageState();
+  const queryClient = useQueryClient();
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<AdminCountry | null>(null);
@@ -60,14 +70,25 @@ function CountriesPage() {
     defaultValues: { name_en: "", name_ar: "", code: "", region: "" },
   });
 
+  const countriesQuery = useQuery({
+    queryKey: ["countries"],
+    queryFn: () => listCountries(),
+    enabled: has("locations.view"),
+    retry: false,
+  });
+  const countries = useMemo(
+    () => (countriesQuery.data?.results ?? []).map(toAdminCountry),
+    [countriesQuery.data],
+  );
+
   const rows = useMemo(
     () =>
-      ADMIN_COUNTRIES.filter(
+      countries.filter(
         (c) =>
           !q ||
           `${c.name_en} ${c.name_ar} ${c.code} ${c.region}`.toLowerCase().includes(q.toLowerCase()),
       ),
-    [q],
+    [countries, q],
   );
 
   if (!has("locations.view")) {
@@ -92,10 +113,32 @@ function CountriesPage() {
     form.reset({ name_en: c.name_en, name_ar: c.name_ar, code: c.code, region: c.region });
     setOpen(true);
   }
-  function onSubmit(values: Values) {
-    toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
-    setOpen(false);
-    void values;
+  async function onSubmit(values: Values) {
+    // The BE stores a single region-scoped name + code (no separate ar name /
+    // free region field); send name from name_en.
+    const body = { name: values.name_en, code: values.code };
+    try {
+      if (editing) {
+        await updateCountry({ data: { id: Number(editing.id), body } });
+      } else {
+        await createCountry({ data: body });
+      }
+      await queryClient.invalidateQueries({ queryKey: ["countries"] });
+      toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
+      setOpen(false);
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
+  }
+
+  async function removeCountry(c: AdminCountry) {
+    try {
+      await deleteCountry({ data: { id: Number(c.id) } });
+      await queryClient.invalidateQueries({ queryKey: ["countries"] });
+      toast.success(t("admin.common.deletedToast"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   const columns: Column<AdminCountry>[] = [
@@ -150,13 +193,13 @@ function CountriesPage() {
       <div className="grid gap-4 md:grid-cols-2">
         <KpiCard
           label={t("admin.locations.countries.title")}
-          value={ADMIN_COUNTRIES.length}
+          value={countries.length}
           icon={<Globe className="h-5 w-5" />}
           accent
         />
         <KpiCard
           label={t("admin.locations.colRegion")}
-          value={new Set(ADMIN_COUNTRIES.map((c) => c.region)).size}
+          value={new Set(countries.map((c) => c.region)).size}
         />
       </div>
 
@@ -214,7 +257,7 @@ function CountriesPage() {
                           title={t("admin.locations.countries.deleteTitle")}
                           confirmLabel={t("admin.common.delete")}
                           typeToConfirm={c.code}
-                          onConfirm={() => toast.success(t("admin.common.deletedToast"))}
+                          onConfirm={() => removeCountry(c)}
                           trigger={
                             <DropdownMenuItem
                               onSelect={(e) => e.preventDefault()}

@@ -16,7 +16,15 @@ import { Can, usePermissions } from "@/components/shared/Can";
 import { useApp } from "@/lib/app-context";
 import { usePageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
-import { SUPPORT_INBOX, type SupportSession } from "@/lib/mock/content";
+import { useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listSupportSessions,
+  pickupSession,
+  toSupportSession,
+  type SupportSession,
+} from "@/lib/api/support.functions";
 
 export const Route = createFileRoute("/_panel/support")({
   head: () => ({ meta: [{ title: "Support inbox — Mixlebs Admin" }] }),
@@ -33,11 +41,25 @@ function SupportPage() {
   const { has } = usePermissions();
   const canView = has("chat.support_inbox_view");
 
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState<TabKey>("unassigned");
   const [search, setSearch] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-  const [rows, setRows] = useState<SupportSession[]>(SUPPORT_INBOX);
+  const [rows, setRows] = useState<SupportSession[]>([]);
+
+  const beFilter = tab === "all_open" ? "open" : tab;
+  const inboxQuery = useQuery({
+    queryKey: ["support-inbox", beFilter],
+    queryFn: () => listSupportSessions({ data: { filter: beFilter } }),
+    enabled: canView,
+    retry: false,
+  });
+  useEffect(() => {
+    if (inboxQuery.data) {
+      setRows((inboxQuery.data.results ?? []).map((s) => toSupportSession(s, [], tab === "mine")));
+    }
+  }, [inboxQuery.data, tab]);
 
   const filtered = useMemo(
     () =>
@@ -59,13 +81,19 @@ function SupportPage() {
     return s.assigned_to === "me" ? t("content.support.tabMine") : s.assigned_to;
   }
 
-  function pickUp(id: string) {
-    setRows((rs) =>
-      rs.map((s) =>
-        s.id === id ? { ...s, status: "ASSIGNED", assigned_to: "me", opened_at: "now" } : s,
-      ),
-    );
-    toast.success(t("content.support.pickedUp"));
+  async function pickUp(id: string) {
+    try {
+      await pickupSession({ data: { id: Number(id) } });
+      setRows((rs) =>
+        rs.map((s) =>
+          s.id === id ? { ...s, status: "ASSIGNED", assigned_to: "me", opened_at: "now" } : s,
+        ),
+      );
+      await queryClient.invalidateQueries({ queryKey: ["support-inbox"] });
+      toast.success(t("content.support.pickedUp"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   const columns: Column<SupportSession>[] = [

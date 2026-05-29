@@ -29,7 +29,15 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { APP_FEEDBACK, type AppFeedback, type FeedbackCategory } from "@/lib/mock/admin";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listFeedback,
+  respondToFeedback,
+  toAppFeedback,
+  type AppFeedback,
+  type FeedbackCategory,
+} from "@/lib/api/feedback.functions";
 
 export const Route = createFileRoute("/_panel/admin/feedback")({
   head: () => ({ meta: [{ title: "App feedback — Mixlebs Admin" }] }),
@@ -55,6 +63,7 @@ function FeedbackPage() {
   const t = useT();
   const { has } = usePermissions();
   const state = usePageState();
+  const queryClient = useQueryClient();
   const [selected, setSelected] = useState<AppFeedback | null>(null);
   const [reply, setReply] = useState("");
 
@@ -64,9 +73,20 @@ function FeedbackPage() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
 
+  const feedbackQuery = useQuery({
+    queryKey: ["feedback"],
+    queryFn: () => listFeedback({ data: {} }),
+    enabled: has("feedback.view"),
+    retry: false,
+  });
+  const allFeedback = useMemo(
+    () => (feedbackQuery.data?.results ?? []).map(toAppFeedback),
+    [feedbackQuery.data],
+  );
+
   const rows = useMemo(
     () =>
-      APP_FEEDBACK.filter((f) => {
+      allFeedback.filter((f) => {
         if (rating !== "all" && f.rating !== Number(rating)) return false;
         if (category !== "all" && f.category !== category) return false;
         if (user && !`${f.user_name} ${f.user_email}`.toLowerCase().includes(user.toLowerCase()))
@@ -75,7 +95,7 @@ function FeedbackPage() {
         if (dateTo && f.created_at.slice(0, 10) > dateTo) return false;
         return true;
       }),
-    [rating, category, user, dateFrom, dateTo],
+    [allFeedback, rating, category, user, dateFrom, dateTo],
   );
 
   if (!has("feedback.view")) {
@@ -88,18 +108,26 @@ function FeedbackPage() {
   }
 
   const avg = (
-    APP_FEEDBACK.reduce((a, f) => a + f.rating, 0) / Math.max(1, APP_FEEDBACK.length)
+    allFeedback.reduce((a, f) => a + f.rating, 0) / Math.max(1, allFeedback.length)
   ).toFixed(1);
-  const bugs = APP_FEEDBACK.filter((f) => f.category === "BUG").length;
+  const bugs = allFeedback.filter((f) => f.category === "BUG").length;
 
   function catLabel(c: FeedbackCategory) {
     return t(`admin.feedback.cat${c}`);
   }
 
-  function sendReply() {
-    toast.success(t("admin.feedback.sent"));
-    setReply("");
-    setSelected(null);
+  async function sendReply() {
+    if (!selected) return;
+    try {
+      // ENTRY 011 — the response is delivered to the submitter as a notification.
+      await respondToFeedback({ data: { id: Number(selected.id), message: reply } });
+      await queryClient.invalidateQueries({ queryKey: ["feedback"] });
+      toast.success(t("admin.feedback.sent"));
+      setReply("");
+      setSelected(null);
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   const columns: Column<AppFeedback>[] = [
@@ -165,7 +193,7 @@ function FeedbackPage() {
       <div className="grid gap-4 md:grid-cols-3">
         <KpiCard
           label={t("admin.feedback.kTotal")}
-          value={APP_FEEDBACK.length}
+          value={allFeedback.length}
           icon={<MessageSquare className="h-5 w-5" />}
           accent
         />

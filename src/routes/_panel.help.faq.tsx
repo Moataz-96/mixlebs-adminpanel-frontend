@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
   HelpCircle,
@@ -34,7 +35,15 @@ import { Can, usePermissions } from "@/components/shared/Can";
 import { usePageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
 import { useApp } from "@/lib/app-context";
-import { RESOURCES, type ResourceEntry, type ResourceSection } from "@/lib/mock/content";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listResources,
+  deleteResource,
+  updateResource,
+  toResourceEntry,
+  type ResourceEntry,
+  type ResourceSection,
+} from "@/lib/api/content.functions";
 
 export const Route = createFileRoute("/_panel/help/faq")({
   head: () => ({ meta: [{ title: "Help center — Mixlebs Admin" }] }),
@@ -58,10 +67,24 @@ function FaqPage() {
   const canView = has("resources.view");
   const canEdit = has("resources.update");
 
+  const queryClient = useQueryClient();
+  const resourcesQuery = useQuery({
+    queryKey: ["resources"],
+    queryFn: () => listResources({ data: {} }),
+    enabled: canView,
+    retry: false,
+  });
+
   const [tab, setTab] = useState<ResourceSection>("FAQ");
   const [search, setSearch] = useState("");
   const [reorder, setReorder] = useState(false);
-  const [rows, setRows] = useState<ResourceEntry[]>(RESOURCES);
+  const [rows, setRows] = useState<ResourceEntry[]>([]);
+
+  useEffect(() => {
+    if (resourcesQuery.data) {
+      setRows((resourcesQuery.data.results ?? []).map(toResourceEntry));
+    }
+  }, [resourcesQuery.data]);
 
   const title = useCallback(
     (r: ResourceEntry) =>
@@ -85,9 +108,15 @@ function FaqPage() {
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, published } : r)));
     toast.success(published ? t("content.faq.publishedToast") : t("content.faq.unpublishedToast"));
   }
-  function remove(id: string) {
-    setRows((rs) => rs.filter((r) => r.id !== id));
-    toast.success(t("content.faq.deleted"));
+  async function remove(id: string) {
+    try {
+      await deleteResource({ data: { id: Number(id) } });
+      setRows((rs) => rs.filter((r) => r.id !== id));
+      await queryClient.invalidateQueries({ queryKey: ["resources"] });
+      toast.success(t("content.faq.deleted"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
   function move(id: string, dir: -1 | 1) {
     const list = [...inSection];
@@ -284,7 +313,17 @@ function FaqPage() {
                 variant="outline"
                 onClick={() => {
                   setReorder((v) => {
-                    if (v) toast.success(t("content.faq.reorderSaved"));
+                    if (v) {
+                      // Persist the reordered `order` values for this section.
+                      void Promise.all(
+                        inSection.map((r) =>
+                          updateResource({ data: { id: Number(r.id), body: { order: r.order } } }),
+                        ),
+                      )
+                        .then(() => queryClient.invalidateQueries({ queryKey: ["resources"] }))
+                        .then(() => toast.success(t("content.faq.reorderSaved")))
+                        .catch((err) => toast.error(parseServerError(err).message));
+                    }
                     return !v;
                   });
                 }}

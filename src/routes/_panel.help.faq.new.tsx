@@ -23,7 +23,12 @@ import {
 } from "@/components/ui/select";
 import { usePermissions } from "@/components/shared/Can";
 import { useT } from "@/lib/i18n";
-import { RESOURCES, type ResourceEntry } from "@/lib/mock/content";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
+import {
+  createResource,
+  updateResource,
+  type ResourceEntry,
+} from "@/lib/api/content.functions";
 
 export const Route = createFileRoute("/_panel/help/faq/new")({
   head: () => ({ meta: [{ title: "New FAQ — Mixlebs Admin" }] }),
@@ -31,7 +36,6 @@ export const Route = createFileRoute("/_panel/help/faq/new")({
 });
 
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const TAKEN_SLUGS = new Set(RESOURCES.map((r) => r.slug));
 
 const schema = z
   .object({
@@ -87,16 +91,41 @@ export function FaqEditor({ mode, value }: { mode: "create" | "edit"; value?: Re
     return m ? t(`content.faqEditor.${m}`) : undefined;
   }
 
-  function onSubmit(values: Values) {
-    if (mode === "create" && TAKEN_SLUGS.has(values.slug)) {
-      setError("slug", { message: "slugTaken" });
-      toast.error(t("content.faqEditor.slugTaken"));
-      return;
+  async function onSubmit(values: Values) {
+    // The BE stores section as a free string + content_type QA|ARTICLE + an
+    // audience[] + per-language translations. Build that payload from the
+    // FROZEN UI form (en/ar title+content collapse into translations[]).
+    const translations = [
+      { language_code: "en", title: values.title_en, content: values.content_en },
+      { language_code: "ar", title: values.title_ar, content: values.content_ar },
+    ].filter((tr) => tr.title.trim() !== "" || tr.content.trim() !== "");
+    const body = {
+      slug: values.slug,
+      section: values.section,
+      content_type: (values.content_type === "QA" ? "QA" : "ARTICLE") as "QA" | "ARTICLE",
+      order: Number(values.order),
+      audience: value?.audiences ?? [],
+      translations,
+    };
+    try {
+      if (mode === "create") {
+        await createResource({ data: body });
+        toast.success(t("content.faqEditor.created"));
+      } else if (value) {
+        await updateResource({ data: { id: Number(value.id), body } });
+        toast.success(t("content.faqEditor.saved"));
+      }
+      navigate({ to: "/help/faq" });
+    } catch (err) {
+      const info = parseServerError(err);
+      const slugErr = fieldMessage(info.fieldErrors, "slug");
+      if (slugErr) {
+        setError("slug", { message: "slugTaken" });
+        toast.error(t("content.faqEditor.slugTaken"));
+        return;
+      }
+      toast.error(info.message);
     }
-    toast.success(
-      mode === "create" ? t("content.faqEditor.created") : t("content.faqEditor.saved"),
-    );
-    navigate({ to: "/help/faq" });
   }
 
   if (!canEdit) {

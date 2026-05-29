@@ -19,12 +19,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useApp } from "@/lib/app-context";
+import { useQuery } from "@tanstack/react-query";
 import {
-  PRODUCT_VISITS,
-  STORE_VISITS,
+  listProductVisitors,
+  listStoreVisitors,
+  toProductVisits,
+  toStoreVisits,
   type ProductVisits,
   type StoreVisits,
-} from "@/lib/mock/admin";
+} from "@/lib/api/visitors.functions";
 
 export const Route = createFileRoute("/_panel/admin/visitors")({
   head: () => ({ meta: [{ title: "Visitors analytics — Mixlebs Admin" }] }),
@@ -40,6 +43,21 @@ function VisitorsPage() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
 
+  const productQuery = useQuery({
+    queryKey: ["visitors-products"],
+    queryFn: () => listProductVisitors({ data: {} }),
+    enabled: has("visitors.view"),
+    retry: false,
+  });
+  const storeQuery = useQuery({
+    queryKey: ["visitors-stores"],
+    queryFn: () => listStoreVisitors({ data: {} }),
+    enabled: has("visitors.view"),
+    retry: false,
+  });
+  const productVisits: ProductVisits[] = (productQuery.data?.results ?? []).map(toProductVisits);
+  const storeVisits: StoreVisits[] = (storeQuery.data?.results ?? []).map(toStoreVisits);
+
   if (!has("visitors.view")) {
     return (
       <div className="p-6">
@@ -50,11 +68,11 @@ function VisitorsPage() {
   }
 
   const storeRows =
-    storeFilter === "all" ? STORE_VISITS : STORE_VISITS.filter((s) => s.id === storeFilter);
-  const totalVisits = PRODUCT_VISITS.reduce((a, p) => a + p.total_visits, 0);
-  const uniqueVisitors = PRODUCT_VISITS.reduce((a, p) => a + p.unique_users, 0);
+    storeFilter === "all" ? storeVisits : storeVisits.filter((s) => s.id === storeFilter);
+  const totalVisits = productVisits.reduce((a, p) => a + p.total_visits, 0);
+  const uniqueVisitors = productVisits.reduce((a, p) => a + p.unique_users, 0);
   const avgConv = (
-    PRODUCT_VISITS.reduce((a, p) => a + p.conversion, 0) / Math.max(1, PRODUCT_VISITS.length)
+    productVisits.reduce((a, p) => a + p.conversion, 0) / Math.max(1, productVisits.length)
   ).toFixed(1);
 
   const fmt = (n: number) => n.toLocaleString();
@@ -226,7 +244,7 @@ function VisitorsPage() {
           </TabsList>
           <TabsContent value="products" className="mt-4">
             <PageStates state={state} missingPerms={["visitors.view"]}>
-              <DataTable data={PRODUCT_VISITS} columns={productCols} getRowId={(r) => r.id} />
+              <DataTable data={productVisits} columns={productCols} getRowId={(r) => r.id} />
             </PageStates>
           </TabsContent>
           <TabsContent value="stores" className="mt-4">

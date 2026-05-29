@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { Plus, FileEdit, Save } from "lucide-react";
 import { toast } from "sonner";
@@ -17,7 +17,13 @@ import { cn } from "@/lib/utils";
 import { Can, usePermissions } from "@/components/shared/Can";
 import { useApp } from "@/lib/app-context";
 import { useT } from "@/lib/i18n";
-import { RESOURCES, type ResourceEntry, type ResourceSection } from "@/lib/mock/content";
+import { useQuery } from "@tanstack/react-query";
+import {
+  listResources,
+  toResourceEntry,
+  type ResourceEntry,
+  type ResourceSection,
+} from "@/lib/api/content.functions";
 
 export const Route = createFileRoute("/_panel/help/articles")({
   head: () => ({ meta: [{ title: "Articles — Mixlebs Admin" }] }),
@@ -56,9 +62,25 @@ export function SectionEditor({
   const canView = has("resources.view");
   const canEdit = has("resources.update");
 
-  const entries = useMemo(() => RESOURCES.filter((r) => r.section === section), [section]);
-  const [selectedId, setSelectedId] = useState<string | null>(entries[0]?.id ?? null);
+  const resourcesQuery = useQuery({
+    queryKey: ["resources"],
+    queryFn: () => listResources({ data: {} }),
+    enabled: canView,
+    retry: false,
+  });
+  const entries = useMemo(
+    () =>
+      (resourcesQuery.data?.results ?? [])
+        .map(toResourceEntry)
+        .filter((r) => r.section === section),
+    [resourcesQuery.data, section],
+  );
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = entries.find((e) => e.id === selectedId) ?? null;
+
+  useEffect(() => {
+    if (selectedId === null && entries.length > 0) setSelectedId(entries[0].id);
+  }, [entries, selectedId]);
 
   function title(r: ResourceEntry) {
     return (r.translations.find((tr) => tr.lang === locale) ?? r.translations[0])?.title ?? r.slug;

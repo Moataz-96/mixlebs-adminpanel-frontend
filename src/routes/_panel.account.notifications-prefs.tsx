@@ -13,7 +13,7 @@ import {
   getNotificationPrefs,
   updateNotificationPrefs,
 } from "@/lib/api/account.functions";
-import { NOTIF_PREF_ROWS, type NotifChannel, type NotifPrefRow } from "@/lib/mock/account";
+import { NOTIF_PREF_ROWS, type NotifChannel, type NotifPrefRow } from "@/lib/constants";
 
 export const Route = createFileRoute("/_panel/account/notifications-prefs")({
   head: () => ({ meta: [{ title: "Notification preferences — Mixlebs Admin" }] }),

@@ -42,14 +42,21 @@ import { usePermissions } from "@/components/shared/Can";
 import { usePageState } from "@/lib/page-state";
 import { useApp } from "@/lib/app-context";
 import { useT } from "@/lib/i18n";
+import { useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseServerError } from "@/lib/api/error";
 import {
-  NOTIF_INBOX,
-  COMM_TEMPLATES,
+  listNotifications,
+  markNotificationRead,
+  markAllNotificationsRead,
+  broadcastNotification,
+  toNotifItem,
   COMM_CHANNELS,
   type NotifItem,
   type NotifType,
   type CommChannel,
-} from "@/lib/mock/content";
+} from "@/lib/api/notifications.functions";
+import { listTemplates, toCommTemplate } from "@/lib/api/templates.functions";
 
 export const Route = createFileRoute("/_panel/notifications")({
   head: () => ({ meta: [{ title: "Notifications — Mixlebs Admin" }] }),
@@ -71,13 +78,20 @@ function NotificationsPage() {
   const { has } = usePermissions();
   const canCompose = has("notifications.send");
 
+  const inboxQuery = useQuery({
+    queryKey: ["notifications"],
+    queryFn: () => listNotifications({ data: {} }),
+    retry: false,
+  });
+  const inbox = (inboxQuery.data?.results ?? []).map(toNotifItem);
+
   return (
     <>
       <PageHeader
         title={t("content.notif.title")}
         description={t("content.notif.subtitle", {
-          unread: NOTIF_INBOX.filter((n) => !n.is_opened).length,
-          total: NOTIF_INBOX.length,
+          unread: inbox.filter((n) => !n.is_opened).length,
+          total: inbox.length,
         })}
       />
       <div className="p-6 pt-0">
@@ -109,11 +123,21 @@ function NotificationsPage() {
 function InboxTab() {
   const t = useT();
   const state = usePageState();
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [type, setType] = useState("all");
   const [channel, setChannel] = useState("all");
   const [opened, setOpened] = useState("all");
-  const [rows, setRows] = useState<NotifItem[]>(NOTIF_INBOX);
+  const [rows, setRows] = useState<NotifItem[]>([]);
+
+  const inboxQuery = useQuery({
+    queryKey: ["notifications"],
+    queryFn: () => listNotifications({ data: {} }),
+    retry: false,
+  });
+  useEffect(() => {
+    if (inboxQuery.data) setRows((inboxQuery.data.results ?? []).map(toNotifItem));
+  }, [inboxQuery.data]);
 
   const filtered = useMemo(
     () =>
@@ -129,13 +153,25 @@ function InboxTab() {
     [rows, search, type, channel, opened],
   );
 
-  function markRead(id: string) {
-    setRows((rs) => rs.map((n) => (n.id === id ? { ...n, is_opened: true } : n)));
-    toast.success(t("content.notif.markedRead"));
+  async function markRead(id: string) {
+    try {
+      await markNotificationRead({ data: { id: Number(id) } });
+      setRows((rs) => rs.map((n) => (n.id === id ? { ...n, is_opened: true } : n)));
+      await queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      toast.success(t("content.notif.markedRead"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
-  function markAll() {
-    setRows((rs) => rs.map((n) => ({ ...n, is_opened: true })));
-    toast.success(t("content.notif.markedAllRead"));
+  async function markAll() {
+    try {
+      await markAllNotificationsRead();
+      setRows((rs) => rs.map((n) => ({ ...n, is_opened: true })));
+      await queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      toast.success(t("content.notif.markedAllRead"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   const columns: Column<NotifItem>[] = [
@@ -343,6 +379,14 @@ function ComposeTab() {
   const { role, stores } = useApp();
   const { has } = usePermissions();
   const canBroadcast = has("notifications.send_broadcast");
+  const queryClient = useQueryClient();
+
+  const templatesQuery = useQuery({
+    queryKey: ["templates"],
+    queryFn: () => listTemplates({ data: {} }),
+    retry: false,
+  });
+  const templates = (templatesQuery.data?.results ?? []).map(toCommTemplate);
 
   const { watch, setValue, handleSubmit } = useForm<ComposeForm>({
     defaultValues: {
@@ -379,8 +423,29 @@ function ComposeTab() {
   }
 
   function submit(action: "send" | "schedule") {
-    return (values: ComposeForm) => {
+    return async (values: ComposeForm) => {
       if (!validate(values)) return;
+      // Broadcast to every CUSTOMER when targeting the audience (the BE has a
+      // dedicated broadcast endpoint). Targeted User/Store sends and scheduling
+      // are composer affordances — targeted send needs a recipient-id picker the
+      // FROZEN UI does not expose, and the BE has no scheduling endpoint.
+      const isBroadcast =
+        values.target_type === "Audience" && values.audience.includes("CUSTOMER") && canBroadcast;
+      if (action === "send" && isBroadcast) {
+        try {
+          await broadcastNotification({
+            data: {
+              title: t("content.notif.composeTitle"),
+              content: values.variables.trim() || t("content.notif.composeDesc"),
+            },
+          });
+          await queryClient.invalidateQueries({ queryKey: ["notifications"] });
+          toast.success(t("content.notif.sent"));
+        } catch (err) {
+          toast.error(parseServerError(err).message);
+        }
+        return;
+      }
       toast.success(action === "send" ? t("content.notif.sent") : t("content.notif.scheduled"));
     };
   }
@@ -488,7 +553,7 @@ function ComposeTab() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="none">{t("content.notif.noTemplate")}</SelectItem>
-              {COMM_TEMPLATES.map((tp) => (
+              {templates.map((tp) => (
                 <SelectItem key={tp.id} value={tp.id}>
                   {tp.type.replace(/_/g, " ")} · {t(`content.templates.channel${tp.channel}`)}
                 </SelectItem>
