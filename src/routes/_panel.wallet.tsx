@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -19,8 +20,13 @@ import { DataToolbar } from "@/components/shared/DataToolbar";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { Can, usePermissions } from "@/components/shared/Can";
 import { PageStates, TableSkeleton } from "@/components/shared/states";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
+import {
+  getWalletSummary,
+  listWalletTransactions,
+  type WalletTransaction,
+} from "@/lib/api/wallet.functions";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -33,16 +39,45 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { WALLET_TX_ROWS, WALLET_SUMMARY, type WalletTxRow } from "@/lib/mock/finance";
 
 export const Route = createFileRoute("/_panel/wallet")({
   head: () => ({ meta: [{ title: "Wallet — Mixlebs Admin" }] }),
   component: WalletPage,
 });
 
+// Frozen-UI row shape (was imported from mock/finance). Mapped from the BE
+// WalletTransaction. ENTRY 008: the BE has no per-row `balance_after` and no
+// related-order/return ref, so those columns render static placeholders.
+interface WalletTxRow {
+  id: string;
+  date: string;
+  type: "CREDIT" | "DEBIT";
+  label: string;
+  amount: number;
+  balance_after: number;
+  related_kind?: "order" | "return";
+  related_ref?: string;
+}
+
+function num(s: string | number | null | undefined): number {
+  const n = typeof s === "number" ? s : parseFloat(String(s ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function mapTx(tx: WalletTransaction): WalletTxRow {
+  return {
+    id: tx.id,
+    date: tx.created_at ? tx.created_at.slice(0, 16).replace("T", " ") : "",
+    type: tx.type === "credit" ? "CREDIT" : "DEBIT",
+    label: tx.label,
+    amount: num(tx.amount),
+    balance_after: 0, // ENTRY 008: not exposed by the BE.
+  };
+}
+
 function WalletPage() {
   const t = useT();
-  const state = usePageState();
+  const previewState = usePageState();
   const { has } = usePermissions();
   const canAdjust = has("wallet.view_any"); // adjustments are an admin-only surface
   const [type, setType] = useState<"ALL" | "CREDIT" | "DEBIT">("ALL");
@@ -50,16 +85,47 @@ function WalletPage() {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
 
+  // Own wallet (user_id omitted -> caller's own; wallet.view_own).
+  const summaryQuery = useQuery({
+    queryKey: ["wallet", "summary"],
+    queryFn: () => getWalletSummary({ data: {} }),
+    staleTime: 30 * 1000,
+  });
+  const txQuery = useQuery({
+    queryKey: ["wallet", "transactions", type, from, to],
+    queryFn: () =>
+      listWalletTransactions({
+        data: {
+          type: type === "ALL" ? undefined : type.toLowerCase(),
+          date_from: from || undefined,
+          date_to: to || undefined,
+          page_size: 200,
+        },
+      }),
+    staleTime: 30 * 1000,
+  });
+
+  const summary = summaryQuery.data;
+  const rows = useMemo(() => (txQuery.data?.results ?? []).map(mapTx), [txQuery.data]);
+
+  const state: PageState =
+    previewState !== "populated"
+      ? previewState
+      : summaryQuery.isLoading || txQuery.isLoading
+        ? "loading"
+        : summaryQuery.isError || txQuery.isError
+          ? "error"
+          : "populated";
+
+  // label is filtered client-side (the BE `q` filter is also available but the
+  // toolbar search box is debounced into this local state).
   const filtered = useMemo(
     () =>
-      WALLET_TX_ROWS.filter((tx) => {
-        if (type !== "ALL" && tx.type !== type) return false;
+      rows.filter((tx) => {
         if (label && !tx.label.toLowerCase().includes(label.toLowerCase())) return false;
-        if (from && tx.date.slice(0, 10) < from) return false;
-        if (to && tx.date.slice(0, 10) > to) return false;
         return true;
       }),
-    [type, label, from, to],
+    [rows, label],
   );
 
   const columns: Column<WalletTxRow>[] = [
@@ -145,20 +211,20 @@ function WalletPage() {
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <KpiCard
           label={t("finance.wallet.balance")}
-          value={`$${WALLET_SUMMARY.balance.toFixed(2)}`}
+          value={`$${num(summary?.balance).toFixed(2)}`}
           delta={t("finance.wallet.readyToWithdraw")}
           icon={<WalletIcon className="h-5 w-5" />}
           accent
         />
-        <KpiCard label={t("finance.wallet.currency")} value={WALLET_SUMMARY.currency} />
+        <KpiCard label={t("finance.wallet.currency")} value={summary?.currency ?? "—"} />
         <KpiCard
           label={t("finance.wallet.lastCredited")}
-          value={WALLET_SUMMARY.last_credited_at}
+          value={summary?.last_credited_at ? summary.last_credited_at.slice(0, 16).replace("T", " ") : "—"}
           icon={<ArrowDownLeft className="h-5 w-5" />}
         />
         <KpiCard
           label={t("finance.wallet.lastDebited")}
-          value={WALLET_SUMMARY.last_debited_at}
+          value={summary?.last_debited_at ? summary.last_debited_at.slice(0, 16).replace("T", " ") : "—"}
           icon={<ArrowUpRight className="h-5 w-5" />}
         />
       </div>

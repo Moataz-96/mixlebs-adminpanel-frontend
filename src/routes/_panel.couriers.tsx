@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Truck, MapPin, Clock, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -9,8 +10,10 @@ import { DataTable, type Column } from "@/components/shared/DataTable";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { Can, usePermissions } from "@/components/shared/Can";
 import { PageStates, TableSkeleton } from "@/components/shared/states";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
+import { parseServerError } from "@/lib/api/error";
+import { listCouriers, deleteCourier, type Courier } from "@/lib/api/couriers.functions";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -20,28 +23,99 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { COURIER_ROWS, type CourierRow } from "@/lib/mock/finance";
 
 export const Route = createFileRoute("/_panel/couriers")({
   head: () => ({ meta: [{ title: "Couriers — Mixlebs Admin" }] }),
   component: CouriersPage,
 });
 
+// Frozen-UI row shape (was imported from mock/finance). Mapped from the BE
+// Courier. ENTRY 008: the BE Courier has no `is_active` flag (couriers are
+// soft-deleted, not toggled) and `locations` arrives as a count of associated
+// rows, so `is_active` is rendered as always-active and `logo` falls back to
+// an initials placeholder when no asset URL is set.
+interface CourierRow {
+  id: string;
+  name: string;
+  rank: number;
+  eta_days: number;
+  base_fee: number;
+  regions: number;
+  is_active: boolean;
+  logo: string;
+}
+
+function num(s: string | number | null | undefined): number {
+  const n = typeof s === "number" ? s : parseFloat(String(s ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function initials(name: string): string {
+  return name
+    .split(/\s+/)
+    .map((w) => w[0])
+    .filter(Boolean)
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+}
+
+function mapCourier(c: Courier): CourierRow {
+  const locCount = Array.isArray(c.locations) ? c.locations.length : num(c.locations);
+  return {
+    id: c.id,
+    name: c.name,
+    rank: c.rank ?? 0,
+    eta_days: c.eta_days ?? 0,
+    base_fee: num(c.base_fee),
+    regions: locCount,
+    is_active: true, // ENTRY 008: no is_active column on the BE.
+    logo: c.logo ? initials(c.name) : initials(c.name),
+  };
+}
+
 function CouriersPage() {
   const t = useT();
   const navigate = useNavigate();
-  const state = usePageState();
+  const previewState = usePageState();
+  const queryClient = useQueryClient();
   const [q, setQ] = useState("");
 
+  const couriersQuery = useQuery({
+    queryKey: ["couriers"],
+    queryFn: () => listCouriers({ data: { page_size: 200 } }),
+    staleTime: 60 * 1000,
+  });
+
+  const rows = useMemo(
+    () => (couriersQuery.data?.results ?? []).map(mapCourier),
+    [couriersQuery.data],
+  );
+
+  const removeMutation = useMutation({
+    mutationFn: (id: string) => deleteCourier({ data: { id } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["couriers"] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  const state: PageState =
+    previewState !== "populated"
+      ? previewState
+      : couriersQuery.isLoading
+        ? "loading"
+        : couriersQuery.isError
+          ? "error"
+          : "populated";
+
   const filtered = useMemo(
-    () => COURIER_ROWS.filter((c) => !q || c.name.toLowerCase().includes(q.toLowerCase())),
-    [q],
+    () => rows.filter((c) => !q || c.name.toLowerCase().includes(q.toLowerCase())),
+    [rows, q],
   );
-  const activeCount = COURIER_ROWS.filter((c) => c.is_active).length;
-  const totalAreas = COURIER_ROWS.reduce((a, c) => a + c.regions, 0);
-  const avgEta = (COURIER_ROWS.reduce((a, c) => a + c.eta_days, 0) / COURIER_ROWS.length).toFixed(
-    1,
-  );
+  const activeCount = rows.filter((c) => c.is_active).length;
+  const totalAreas = rows.reduce((a, c) => a + c.regions, 0);
+  const avgEta = (
+    rows.length ? rows.reduce((a, c) => a + c.eta_days, 0) / rows.length : 0
+  ).toFixed(1);
 
   const columns: Column<CourierRow>[] = [
     {
@@ -171,7 +245,9 @@ function CouriersPage() {
             columns={columns}
             getRowId={(c) => c.id}
             emptyState={<EmptyCouriers />}
-            rowActions={(c) => <CourierRowActions courier={c} />}
+            rowActions={(c) => (
+              <CourierRowActions courier={c} onDelete={() => removeMutation.mutate(c.id)} />
+            )}
           />
         </PageStates>
       </div>
@@ -179,7 +255,13 @@ function CouriersPage() {
   );
 }
 
-function CourierRowActions({ courier }: { courier: CourierRow }) {
+function CourierRowActions({
+  courier,
+  onDelete,
+}: {
+  courier: CourierRow;
+  onDelete: () => void;
+}) {
   const t = useT();
   const navigate = useNavigate();
   const { has } = usePermissions();
@@ -214,7 +296,7 @@ function CourierRowActions({ courier }: { courier: CourierRow }) {
           destructive
           typeToConfirm={courier.name}
           confirmLabel={t("finance.couriers.delete")}
-          onConfirm={() => toast.success(t("finance.couriers.deleted", { name: courier.name }))}
+          onConfirm={onDelete}
         />
       </DropdownMenuContent>
     </DropdownMenu>

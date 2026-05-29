@@ -6,6 +6,12 @@ import { toast } from "sonner";
 import { ArrowLeft, Save, CreditCard, ShieldCheck } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { useT } from "@/lib/i18n";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
+import {
+  createPaymentMethod,
+  updatePaymentMethod,
+  type PaymentMethod,
+} from "@/lib/api/payment_methods.functions";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,12 +24,19 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { PaymentMethodRow } from "@/lib/mock/finance";
 
 export const Route = createFileRoute("/_panel/payment-methods/new")({
   head: () => ({ meta: [{ title: "New payment method — Mixlebs Admin" }] }),
-  component: () => <PaymentMethodEditor mode="create" />,
+  validateSearch: (s: Record<string, unknown>) => ({
+    store_id: typeof s.store_id === "string" ? s.store_id : undefined,
+  }),
+  component: NewPaymentMethod,
 });
+
+function NewPaymentMethod() {
+  const { store_id } = Route.useSearch();
+  return <PaymentMethodEditor mode="create" storeId={store_id} />;
+}
 
 const CURRENT_YEAR = 2026;
 
@@ -44,20 +57,24 @@ type Values = z.infer<typeof schema>;
 export function PaymentMethodEditor({
   mode,
   value,
+  storeId,
 }: {
   mode: "create" | "edit";
-  value?: PaymentMethodRow;
+  value?: PaymentMethod;
+  storeId?: string;
 }) {
   const t = useT();
   const navigate = useNavigate();
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: {
-      brand: value?.brand ?? "Visa",
+      brand: (value?.brand as Values["brand"]) ?? "Visa",
       holder_name: value?.holder_name ?? "",
       exp_month: value?.exp_month ?? 1,
       exp_year: value?.exp_year ?? CURRENT_YEAR + 2,
-      token: value?.last4 ? `tok_live_${value.last4}` : "",
+      // token is write-only; the BE never returns it. Edit starts blank and only
+      // re-sends a token when the operator re-tokenizes the card.
+      token: "",
       is_default: value?.is_default ?? false,
     },
   });
@@ -65,12 +82,59 @@ export function PaymentMethodEditor({
     register,
     handleSubmit,
     control,
+    setError,
     formState: { errors, isSubmitting },
   } = form;
 
-  function onSubmit(_values: Values) {
-    toast.success(t("finance.payments.saved"));
-    navigate({ to: "/payment-methods" });
+  async function onSubmit(values: Values) {
+    try {
+      if (mode === "edit" && value) {
+        await updatePaymentMethod({
+          data: {
+            id: value.id,
+            brand: values.brand,
+            holder_name: values.holder_name,
+            exp_month: values.exp_month,
+            exp_year: values.exp_year,
+            ...(values.token ? { token: values.token } : {}),
+            is_default: values.is_default,
+          },
+        });
+      } else {
+        await createPaymentMethod({
+          data: {
+            brand: values.brand,
+            holder_name: values.holder_name,
+            exp_month: values.exp_month,
+            exp_year: values.exp_year,
+            token: values.token,
+            is_default: values.is_default,
+            store_id: storeId,
+          },
+        });
+      }
+      toast.success(t("finance.payments.saved"));
+      navigate({ to: "/payment-methods" });
+    } catch (err) {
+      const info = parseServerError(err);
+      const keys: (keyof Values)[] = [
+        "brand",
+        "holder_name",
+        "exp_month",
+        "exp_year",
+        "token",
+        "is_default",
+      ];
+      let mapped = false;
+      for (const k of keys) {
+        const msg = fieldMessage(info.fieldErrors, k as string);
+        if (msg) {
+          setError(k, { message: msg });
+          mapped = true;
+        }
+      }
+      if (!mapped) toast.error(info.message);
+    }
   }
 
   return (

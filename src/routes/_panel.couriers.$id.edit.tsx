@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -9,6 +10,16 @@ import { PageHeader } from "@/components/shared/PageHeader";
 import { ForbiddenState } from "@/components/shared/states";
 import { usePermissions } from "@/components/shared/Can";
 import { useT } from "@/lib/i18n";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
+import {
+  getCourier,
+  createCourier,
+  updateCourier,
+  listDeliveryAreas,
+  removeDeliveryArea,
+  type Courier,
+  type DeliveryArea,
+} from "@/lib/api/couriers.functions";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -30,18 +41,24 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  COURIER_ROWS,
-  DELIVERY_AREAS,
-  REGIONS,
-  LOCATIONS,
-  type DeliveryAreaRow,
-} from "@/lib/mock/finance";
 
 export const Route = createFileRoute("/_panel/couriers/$id/edit")({
   head: () => ({ meta: [{ title: "Edit courier — Mixlebs Admin" }] }),
   component: EditCourier,
 });
+
+// ENTRY 008: region / locations pickers stay STATIC placeholders. Phase 6 has no
+// admin Location/Region lookup endpoint wired (those land in Phase 8), so the
+// region combobox + locations chip input are decorative until then; the form
+// submits only the scalar courier fields (name / rank / eta / base_fee). The
+// `region_id` / `location_ids` write fields exist in the server fn and will be
+// hooked up once the lookup endpoints are wired in Phase 8.
+const REGIONS = [
+  { id: "reg_lb", name: "Lebanon" },
+  { id: "reg_ae", name: "United Arab Emirates" },
+  { id: "reg_sa", name: "Saudi Arabia" },
+];
+const LOCATIONS = ["Beirut", "Tripoli", "Saida", "Zahle", "Jounieh", "Byblos", "Tyre", "Baalbek"];
 
 const schema = z.object({
   name: z.string().min(1).max(255),
@@ -53,33 +70,61 @@ const schema = z.object({
 });
 type Values = z.infer<typeof schema>;
 
+function num(s: string | number | null | undefined): number {
+  const n = typeof s === "number" ? s : parseFloat(String(s ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
 function EditCourier() {
   const t = useT();
   const navigate = useNavigate();
   const { has } = usePermissions();
+  const queryClient = useQueryClient();
   const { id } = Route.useParams();
   const isNew = id === "new";
-  const c = isNew ? undefined : (COURIER_ROWS.find((x) => x.id === id) ?? COURIER_ROWS[0]);
+
+  const courierQuery = useQuery({
+    queryKey: ["courier", id],
+    queryFn: () => getCourier({ data: { id } }),
+    enabled: !isNew && has("couriers.update"),
+  });
+  const c: Courier | undefined = courierQuery.data;
+
+  const areasQuery = useQuery({
+    queryKey: ["courier-areas", id],
+    queryFn: () => listDeliveryAreas({ data: { id, page_size: 200 } }),
+    enabled: !isNew && has("couriers.update"),
+  });
+  const areas: DeliveryArea[] = useMemo(
+    () => areasQuery.data?.results ?? [],
+    [areasQuery.data],
+  );
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
-    defaultValues: {
+    values: {
       name: c?.name ?? "",
-      rank: c?.rank ?? COURIER_ROWS.length + 1,
+      rank: c?.rank ?? 1,
       eta_days: c?.eta_days ?? 2,
-      base_fee: c?.base_fee ?? 0,
-      region_id: c?.region_id ?? REGIONS[0].id,
-      locations: c ? LOCATIONS.slice(0, Math.min(3, LOCATIONS.length)) : [],
+      base_fee: num(c?.base_fee),
+      region_id: REGIONS[0].id,
+      locations: [],
     },
   });
   const {
     register,
     handleSubmit,
     control,
+    setError,
     formState: { errors, isSubmitting },
   } = form;
-  const [isActive, setIsActive] = useState(c?.is_active ?? true);
-  const [areas, setAreas] = useState<DeliveryAreaRow[]>(isNew ? [] : DELIVERY_AREAS);
+  const [isActive, setIsActive] = useState(true);
+
+  const removeAreaMutation = useMutation({
+    mutationFn: (areaId: number) => removeDeliveryArea({ data: { id, area_id: areaId } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["courier-areas", id] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
 
   if (!has("couriers.update")) {
     return (
@@ -89,25 +134,60 @@ function EditCourier() {
     );
   }
 
-  function onSubmit(_values: Values) {
-    toast.success(t("finance.couriers.saved"));
-    navigate({ to: "/couriers" });
+  async function onSubmit(values: Values) {
+    // ENTRY 008: region_id / location_ids are NOT sent (no lookup wired yet);
+    // only scalar courier fields are persisted in Phase 6.
+    try {
+      if (isNew) {
+        await createCourier({
+          data: {
+            name: values.name,
+            rank: values.rank,
+            eta_days: values.eta_days,
+            base_fee: values.base_fee,
+          },
+        });
+      } else {
+        await updateCourier({
+          data: {
+            id,
+            name: values.name,
+            rank: values.rank,
+            eta_days: values.eta_days,
+            base_fee: values.base_fee,
+          },
+        });
+      }
+      toast.success(t("finance.couriers.saved"));
+      navigate({ to: "/couriers" });
+    } catch (err) {
+      const info = parseServerError(err);
+      const keys: (keyof Values)[] = ["name", "rank", "eta_days", "base_fee"];
+      let mapped = false;
+      for (const k of keys) {
+        const msg = fieldMessage(info.fieldErrors, k as string);
+        if (msg) {
+          setError(k, { message: msg });
+          mapped = true;
+        }
+      }
+      if (!mapped) toast.error(info.message);
+    }
   }
 
+  function removeArea(aid: number) {
+    removeAreaMutation.mutate(aid);
+  }
+
+  // ENTRY 008: adding / re-defaulting a delivery area needs a Location picker
+  // (admin Location lookup, wired in Phase 8). Until then these stay no-ops so
+  // the frozen UI controls remain but cannot create dangling rows. `removeArea`
+  // is fully wired against DELETE /couriers/{id}/delivery-areas/{area_id}/.
   function addArea() {
-    const used = new Set(areas.map((a) => a.location));
-    const next = LOCATIONS.find((l) => !used.has(l));
-    if (!next) return;
-    setAreas([
-      ...areas,
-      { id: `da_${Date.now()}`, location: next, is_default: areas.length === 0 },
-    ]);
+    toast.info(t("finance.couriers.daEmpty"));
   }
-  function removeArea(aid: string) {
-    setAreas(areas.filter((a) => a.id !== aid));
-  }
-  function setDefaultArea(aid: string) {
-    setAreas(areas.map((a) => ({ ...a, is_default: a.id === aid })));
+  function setDefaultArea(_aid: number) {
+    /* no-op placeholder — BE delivery-area PATCH not exposed in Phase 6 */
   }
 
   return (
@@ -283,7 +363,7 @@ function EditCourier() {
                 <TableBody>
                   {areas.map((a) => (
                     <TableRow key={a.id}>
-                      <TableCell className="font-medium">{a.location}</TableCell>
+                      <TableCell className="font-medium">#{a.location_id}</TableCell>
                       <TableCell className="text-center">
                         {a.is_default ? (
                           <Badge
@@ -331,7 +411,7 @@ function EditCourier() {
             </h3>
             <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed bg-muted/30 p-6">
               <div className="grid h-16 w-16 place-items-center rounded-2xl bg-gradient-primary text-lg font-bold text-primary-foreground shadow-glow">
-                {c?.logo ?? "?"}
+                {c?.name ? c.name.slice(0, 2).toUpperCase() : "?"}
               </div>
               <Button type="button" variant="outline" size="sm">
                 <Upload className="me-1.5 h-3.5 w-3.5" /> {t("finance.couriers.logoUpload")}

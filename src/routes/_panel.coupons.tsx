@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
   Ticket,
@@ -21,8 +22,17 @@ import { DataTable, type Column } from "@/components/shared/DataTable";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { Can, usePermissions } from "@/components/shared/Can";
 import { PageStates, TableSkeleton } from "@/components/shared/states";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
+import { useApp } from "@/lib/app-context";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listCoupons,
+  createCoupon,
+  updateCoupon,
+  deleteCoupon,
+  type Coupon,
+} from "@/lib/api/coupons.functions";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -40,12 +50,59 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { COUPON_ROWS, STORE_OPTIONS, type CouponRow } from "@/lib/mock/finance";
 
 export const Route = createFileRoute("/_panel/coupons")({
   head: () => ({ meta: [{ title: "Coupons — Mixlebs Admin" }] }),
   component: CouponsPage,
 });
+
+// Frozen-UI local row shape (was imported from mock/finance). The §9.1 table
+// renders these names; they are mapped from the BE Coupon below. Decimal money
+// fields are coerced from DRF strings to numbers for the existing formatters.
+interface CouponRow {
+  id: string;
+  code: string;
+  scope: "PLATFORM" | "STORE";
+  store?: string;
+  discount_type: "MONETARY" | "PERCENTAGE";
+  discount_value: number;
+  capped_at?: number | null;
+  min_order_cost: number;
+  min_num_items: number;
+  max_uses: number;
+  max_uses_per_user: number;
+  times_used: number;
+  is_valid: boolean;
+  starts_at: string;
+  expires: string;
+  created_at: string;
+}
+
+function num(s: string | number | null | undefined): number {
+  const n = typeof s === "number" ? s : parseFloat(String(s ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function mapCoupon(c: Coupon): CouponRow {
+  return {
+    id: String(c.id),
+    code: c.code,
+    scope: c.scope,
+    store: c.store_name ?? undefined,
+    discount_type: c.discount_type,
+    discount_value: num(c.discount_value),
+    capped_at: c.capped_at != null ? num(c.capped_at) : null,
+    min_order_cost: num(c.min_order_cost),
+    min_num_items: c.min_num_items,
+    max_uses: c.max_uses,
+    max_uses_per_user: c.max_uses_per_user,
+    times_used: c.times_used,
+    is_valid: c.is_valid,
+    starts_at: c.starts_at ?? "",
+    expires: c.expires ?? "",
+    created_at: c.created_at ?? "",
+  };
+}
 
 function formatDiscount(c: CouponRow) {
   return c.discount_type === "PERCENTAGE"
@@ -56,7 +113,84 @@ function formatDiscount(c: CouponRow) {
 function CouponsPage() {
   const t = useT();
   const navigate = useNavigate();
-  const state = usePageState();
+  const previewState = usePageState();
+  const { currentStoreId, stores } = useApp();
+  const queryClient = useQueryClient();
+
+  // Live coupons. STAFF/ADMIN scope to the topbar store picker (null = all);
+  // STORE users are auto-scoped on the BE.
+  const couponsQuery = useQuery({
+    queryKey: ["coupons", currentStoreId],
+    queryFn: () => listCoupons({ data: { store_id: currentStoreId, page_size: 200 } }),
+    staleTime: 30 * 1000,
+  });
+
+  const rows: CouponRow[] = useMemo(
+    () => (couponsQuery.data?.results ?? []).map(mapCoupon),
+    [couponsQuery.data],
+  );
+  const rawById = useMemo(() => {
+    const m = new Map<string, Coupon>();
+    (couponsQuery.data?.results ?? []).forEach((c) => m.set(String(c.id), c));
+    return m;
+  }, [couponsQuery.data]);
+
+  const state: PageState =
+    previewState !== "populated"
+      ? previewState
+      : couponsQuery.isLoading
+        ? "loading"
+        : couponsQuery.isError
+          ? "error"
+          : "populated";
+
+  // Disable a coupon (is_valid=false). The editor screen owns full edits.
+  const disableMutation = useMutation({
+    mutationFn: (c: Coupon) =>
+      updateCoupon({
+        data: {
+          id: c.id,
+          code: c.code,
+          discount_type: c.discount_type,
+          expires: c.expires ?? "",
+          is_valid: false,
+        },
+      }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["coupons"] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  // Duplicate a coupon — create a fresh one with a suffixed code.
+  const duplicateMutation = useMutation({
+    mutationFn: (c: Coupon) =>
+      createCoupon({
+        data: {
+          code: `${c.code}-COPY`,
+          scope: c.scope,
+          store_id: c.store_id ?? undefined,
+          discount_type: c.discount_type,
+          discount_value: c.discount_value ?? "0",
+          capped_at: c.capped_at ?? undefined,
+          min_order_cost: c.min_order_cost ?? undefined,
+          min_num_items: c.min_num_items,
+          max_uses: c.max_uses,
+          max_uses_per_user: c.max_uses_per_user,
+          is_valid: c.is_valid,
+          expires: c.expires ?? "",
+        },
+      }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["coupons"] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: (id: string) => deleteCoupon({ data: { id } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["coupons"] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  const storeOptions = useMemo(() => stores.map((s) => s.name), [stores]);
+
   const [q, setQ] = useState("");
   const [discountType, setDiscountType] = useState<"ALL" | "MONETARY" | "PERCENTAGE">("ALL");
   const [validity, setValidity] = useState<"ALL" | "valid" | "invalid">("ALL");
@@ -68,7 +202,7 @@ function CouponsPage() {
   const [createdTo, setCreatedTo] = useState("");
 
   const filtered = useMemo(() => {
-    return COUPON_ROWS.filter((c) => {
+    return rows.filter((c) => {
       if (q && !c.code.toLowerCase().includes(q.toLowerCase())) return false;
       if (discountType !== "ALL" && c.discount_type !== discountType) return false;
       if (validity === "valid" && !c.is_valid) return false;
@@ -81,14 +215,14 @@ function CouponsPage() {
       if (createdTo && c.created_at.slice(0, 10) > createdTo) return false;
       return true;
     });
-  }, [q, discountType, validity, scope, store, expiresFrom, expiresTo, createdFrom, createdTo]);
+  }, [rows, q, discountType, validity, scope, store, expiresFrom, expiresTo, createdFrom, createdTo]);
 
-  const active = COUPON_ROWS.filter((c) => c.is_valid).length;
-  const scheduled = COUPON_ROWS.filter(
+  const active = rows.filter((c) => c.is_valid).length;
+  const scheduled = rows.filter(
     (c) => c.is_valid && c.starts_at.slice(0, 10) > "2026-05-29",
   ).length;
-  const expired = COUPON_ROWS.filter((c) => !c.is_valid).length;
-  const redemptions = COUPON_ROWS.reduce((a, c) => a + c.times_used, 0);
+  const expired = rows.filter((c) => !c.is_valid).length;
+  const redemptions = rows.reduce((a, c) => a + c.times_used, 0);
 
   const columns: Column<CouponRow>[] = [
     {
@@ -311,7 +445,7 @@ function CouponsPage() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="ALL">{t("finance.coupons.fAllStores")}</SelectItem>
-                  {STORE_OPTIONS.map((s) => (
+                  {storeOptions.map((s) => (
                     <SelectItem key={s} value={s}>
                       {s}
                     </SelectItem>
@@ -365,7 +499,20 @@ function CouponsPage() {
             columns={columns}
             getRowId={(c) => c.id}
             emptyState={<EmptyCoupons />}
-            rowActions={(c) => <CouponRowActions coupon={c} />}
+            rowActions={(c) => (
+              <CouponRowActions
+                coupon={c}
+                onDisable={() => {
+                  const raw = rawById.get(c.id);
+                  if (raw) disableMutation.mutate(raw);
+                }}
+                onDuplicate={() => {
+                  const raw = rawById.get(c.id);
+                  if (raw) duplicateMutation.mutate(raw);
+                }}
+                onDelete={() => removeMutation.mutate(c.id)}
+              />
+            )}
           />
         </PageStates>
       </div>
@@ -373,7 +520,17 @@ function CouponsPage() {
   );
 }
 
-function CouponRowActions({ coupon }: { coupon: CouponRow }) {
+function CouponRowActions({
+  coupon,
+  onDisable,
+  onDuplicate,
+  onDelete,
+}: {
+  coupon: CouponRow;
+  onDisable: () => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
+}) {
   const t = useT();
   const navigate = useNavigate();
   const { has } = usePermissions();
@@ -391,13 +548,13 @@ function CouponRowActions({ coupon }: { coupon: CouponRow }) {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-44">
         <DropdownMenuItem
-          onClick={() => navigate({ to: "/coupons/$id/redemptions", params: { id: coupon.code } })}
+          onClick={() => navigate({ to: "/coupons/$id/redemptions", params: { id: coupon.id } })}
         >
           <Eye className="me-2 h-3.5 w-3.5" /> {t("finance.coupons.actView")}
         </DropdownMenuItem>
         {has("coupons.update") && (
           <DropdownMenuItem
-            onClick={() => navigate({ to: "/coupons/$id/edit", params: { id: coupon.code } })}
+            onClick={() => navigate({ to: "/coupons/$id/edit", params: { id: coupon.id } })}
           >
             <Pencil className="me-2 h-3.5 w-3.5" /> {t("finance.coupons.actEdit")}
           </DropdownMenuItem>
@@ -412,13 +569,11 @@ function CouponRowActions({ coupon }: { coupon: CouponRow }) {
             title={t("finance.coupons.disableConfirmTitle")}
             description={t("finance.coupons.disableConfirmDesc", { code: coupon.code })}
             confirmLabel={t("finance.coupons.actDisable")}
-            onConfirm={() => toast.success(t("finance.coupons.disabled", { code: coupon.code }))}
+            onConfirm={onDisable}
           />
         )}
         {has("coupons.create") && (
-          <DropdownMenuItem
-            onClick={() => toast.success(t("finance.coupons.duplicated", { code: coupon.code }))}
-          >
+          <DropdownMenuItem onClick={onDuplicate}>
             <Copy className="me-2 h-3.5 w-3.5" /> {t("finance.coupons.actDuplicate")}
           </DropdownMenuItem>
         )}
@@ -435,7 +590,7 @@ function CouponRowActions({ coupon }: { coupon: CouponRow }) {
               destructive
               typeToConfirm={coupon.code}
               confirmLabel={t("finance.coupons.actDelete")}
-              onConfirm={() => toast.success(t("finance.coupons.deleted", { code: coupon.code }))}
+              onConfirm={onDelete}
             />
           </>
         )}

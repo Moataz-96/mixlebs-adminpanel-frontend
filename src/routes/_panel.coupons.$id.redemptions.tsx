@@ -1,21 +1,28 @@
 import { useMemo } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Download, Ticket } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { KpiCard } from "@/components/shared/KpiCard";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageStates, TableSkeleton } from "@/components/shared/states";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
+import { useApp } from "@/lib/app-context";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { COUPON_ROWS } from "@/lib/mock/finance";
+import {
+  getCoupon,
+  listRedemptions,
+  type CouponRedemption,
+} from "@/lib/api/coupons.functions";
 
 export const Route = createFileRoute("/_panel/coupons/$id/redemptions")({
   head: () => ({ meta: [{ title: "Coupon redemptions — Mixlebs Admin" }] }),
   component: Redemptions,
 });
 
+// Frozen-UI row shape (was a fabricated mock). Mapped from CouponRedemption.
 interface Redemption {
   id: string;
   redeemed_at: string;
@@ -24,39 +31,57 @@ interface Redemption {
   amount: number;
 }
 
+function num(s: string | number | null | undefined): number {
+  const n = typeof s === "number" ? s : parseFloat(String(s ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
 function Redemptions() {
   const t = useT();
-  const state = usePageState();
+  const previewState = usePageState();
   const { id } = Route.useParams();
-  const c = COUPON_ROWS.find((x) => x.code === id) ?? COUPON_ROWS[0];
+  const { currentStoreId } = useApp();
+
+  const couponQuery = useQuery({
+    queryKey: ["coupon", id],
+    queryFn: () => getCoupon({ data: { id } }),
+  });
+  const redemptionsQuery = useQuery({
+    queryKey: ["coupon-redemptions", id, currentStoreId],
+    queryFn: () =>
+      listRedemptions({ data: { id, store_id: currentStoreId, page_size: 200 } }),
+  });
+
+  const c = couponQuery.data;
+  const discountValue = num(c?.discount_value);
+  const discountLabel =
+    c?.discount_type === "PERCENTAGE" ? `${discountValue}%` : `$${discountValue.toFixed(2)}`;
 
   const rows: Redemption[] = useMemo(
     () =>
-      Array.from({ length: Math.min(8, Math.max(1, c.times_used)) }).map((_, i) => ({
-        id: `red_${i}`,
-        redeemed_at: `2026-05-${20 + i} 1${i}:${String((i * 7) % 60).padStart(2, "0")}`,
-        user: [
-          "Layla Haddad",
-          "Omar Khoury",
-          "Nour Saade",
-          "Rami Geagea",
-          "Aya Mansour",
-          "Hadi Nasr",
-          "Maya Fares",
-          "Ziad Khalil",
-        ][i],
-        order: `MX-${4500 - i}`,
-        amount:
-          c.discount_type === "PERCENTAGE"
-            ? Number((((40 + i * 12) * c.discount_value) / 100).toFixed(2))
-            : c.discount_value,
+      (redemptionsQuery.data?.results ?? []).map((r: CouponRedemption): Redemption => ({
+        id: String(r.id),
+        redeemed_at: r.created_at ? r.created_at.slice(0, 16).replace("T", " ") : "",
+        user: r.user_email || r.user_phone || "—",
+        order: "—",
+        // The BE redemption row carries no per-redemption discount amount; show
+        // the coupon's nominal value as the line amount for MONETARY coupons.
+        amount: c?.discount_type === "MONETARY" ? discountValue : 0,
       })),
-    [c],
+    [redemptionsQuery.data, c?.discount_type, discountValue],
   );
 
+  const state: PageState =
+    previewState !== "populated"
+      ? previewState
+      : couponQuery.isLoading || redemptionsQuery.isLoading
+        ? "loading"
+        : couponQuery.isError || redemptionsQuery.isError
+          ? "error"
+          : "populated";
+
+  const timesUsed = redemptionsQuery.data?.count ?? rows.length;
   const totalDiscount = rows.reduce((a, r) => a + r.amount, 0);
-  const discountLabel =
-    c.discount_type === "PERCENTAGE" ? `${c.discount_value}%` : `$${c.discount_value.toFixed(2)}`;
 
   const columns: Column<Redemption>[] = [
     {
@@ -88,11 +113,14 @@ function Redemptions() {
   return (
     <div className="p-6">
       <PageHeader
-        title={t("finance.redemptions.title", { code: c.code })}
+        title={t("finance.redemptions.title", { code: c?.code ?? "" })}
         description={
-          c.scope === "PLATFORM"
+          c?.scope === "PLATFORM"
             ? t("finance.redemptions.subtitlePlatform")
-            : t("finance.redemptions.subtitle", { store: c.store ?? "", discount: discountLabel })
+            : t("finance.redemptions.subtitle", {
+                store: c?.store_name ?? "",
+                discount: discountLabel,
+              })
         }
         actions={
           <>
@@ -109,11 +137,13 @@ function Redemptions() {
       />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label={t("finance.coupons.kpiRedemptions")} value={c.times_used} accent />
+        <KpiCard label={t("finance.coupons.kpiRedemptions")} value={timesUsed} accent />
         <KpiCard
           label={t("finance.coupons.colMaxUses")}
-          value={c.max_uses === 0 ? "∞" : c.max_uses}
-          delta={c.max_uses === 0 ? undefined : `${Math.round((c.times_used / c.max_uses) * 100)}%`}
+          value={!c || c.max_uses === 0 ? "∞" : c.max_uses}
+          delta={
+            !c || c.max_uses === 0 ? undefined : `${Math.round((timesUsed / c.max_uses) * 100)}%`
+          }
         />
         <KpiCard
           label={t("finance.redemptions.footTotalDiscount")}
@@ -121,7 +151,7 @@ function Redemptions() {
         />
         <KpiCard
           label={t("finance.coupons.colValidity")}
-          value={c.is_valid ? t("finance.coupons.fValid") : t("finance.coupons.fInvalid")}
+          value={c?.is_valid ? t("finance.coupons.fValid") : t("finance.coupons.fInvalid")}
         />
       </div>
 

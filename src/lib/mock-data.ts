@@ -262,62 +262,7 @@ export const CUSTOMERS: Customer[] = Array.from({ length: 12 }).map((_, i) => ({
   blocked: i === 6,
 }));
 
-export interface Coupon {
-  code: string;
-  scope: "PLATFORM" | "STORE";
-  store?: string;
-  discount: string;
-  uses: number;
-  cap: number;
-  starts: string;
-  ends: string;
-  status: "ACTIVE" | "SCHEDULED" | "EXPIRED";
-}
-
-export const COUPONS: Coupon[] = [
-  {
-    code: "SAFFRON15",
-    scope: "STORE",
-    store: "Beirut Pantry",
-    discount: "15%",
-    uses: 84,
-    cap: 500,
-    starts: "2026-05-01",
-    ends: "2026-06-30",
-    status: "ACTIVE",
-  },
-  {
-    code: "WELCOME10",
-    scope: "PLATFORM",
-    discount: "10 USD",
-    uses: 1240,
-    cap: 5000,
-    starts: "2026-01-01",
-    ends: "2026-12-31",
-    status: "ACTIVE",
-  },
-  {
-    code: "RAMADAN25",
-    scope: "PLATFORM",
-    discount: "25%",
-    uses: 3120,
-    cap: 3120,
-    starts: "2026-03-01",
-    ends: "2026-04-15",
-    status: "EXPIRED",
-  },
-  {
-    code: "OLIVE20",
-    scope: "STORE",
-    store: "Zahle Olive Press",
-    discount: "20%",
-    uses: 0,
-    cap: 200,
-    starts: "2026-06-15",
-    ends: "2026-07-15",
-    status: "SCHEDULED",
-  },
-];
+// removed: P6 Wire — coupons fetched live via listCoupons()/getCoupon(); no consumer left.
 
 // removed: P4 Wire — categories fetched live via listCategories(); no consumer left.
 export interface Category {
@@ -369,36 +314,9 @@ export const TAGS = ["new", "best-seller", "organic", "vegan", "halal", "gluten-
 // removed: P5 Wire — returns are fetched live via listReturns(); no consumer left.
 // removed: P5 Wire — invoices are fetched live via listInvoices(); no consumer left.
 
-export const COURIERS = [
-  { id: "cou_01", name: "Beirut Express", areas: 12, active: true },
-  { id: "cou_02", name: "Cedar Logistics", areas: 28, active: true },
-  { id: "cou_03", name: "Mountain Routes", areas: 6, active: false },
-];
-
-export const PAYMENT_METHODS = [
-  { id: "pm_01", name: "Cash on Delivery", type: "COD", active: true, fees: "0%" },
-  { id: "pm_02", name: "Visa / Mastercard", type: "CARD", active: true, fees: "2.9% + 0.30 USD" },
-  { id: "pm_03", name: "Whish Money", type: "WALLET", active: true, fees: "1.5%" },
-  { id: "pm_04", name: "OMT Transfer", type: "BANK", active: false, fees: "1 USD" },
-];
-
-export const WALLET_TX = [
-  {
-    id: "tx_001",
-    type: "CREDIT",
-    amount: 240.0,
-    note: "Payout — Orders MX-4490..4498",
-    at: "2026-05-27 09:00",
-  },
-  { id: "tx_002", type: "DEBIT", amount: 12.5, note: "Platform fee", at: "2026-05-27 09:00" },
-  {
-    id: "tx_003",
-    type: "CREDIT",
-    amount: 84.5,
-    note: "Order MX-4501 settled",
-    at: "2026-05-28 14:10",
-  },
-];
+// removed: P6 Wire — couriers fetched live via listCouriers(); no consumer left.
+// removed: P6 Wire — payment methods fetched live via listPaymentMethods(); no consumer left.
+// removed: P6 Wire — wallet transactions fetched live via listWalletTransactions(); no consumer left.
 
 export const USERS = [
   {

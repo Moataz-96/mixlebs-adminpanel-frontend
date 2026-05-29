@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, CreditCard, Star, MoreHorizontal, Pencil, Trash2, Store } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -9,9 +10,16 @@ import { DataTable, type Column } from "@/components/shared/DataTable";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { Can, usePermissions } from "@/components/shared/Can";
 import { PageStates, TableSkeleton } from "@/components/shared/states";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
 import { useApp } from "@/lib/app-context";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listPaymentMethods,
+  updatePaymentMethod,
+  deletePaymentMethod,
+  type PaymentMethod,
+} from "@/lib/api/payment_methods.functions";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -29,12 +37,37 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { PAYMENT_METHOD_ROWS, STORE_OPTIONS, type PaymentMethodRow } from "@/lib/mock/finance";
 
 export const Route = createFileRoute("/_panel/payment-methods")({
   head: () => ({ meta: [{ title: "Payment methods — Mixlebs Admin" }] }),
   component: PaymentMethodsPage,
 });
+
+// Frozen-UI row shape (was imported from mock/finance). Mapped from the BE
+// PaymentMethod; `store` columns are not rendered by §9.4 (per-store scope).
+interface PaymentMethodRow {
+  id: string;
+  brand: "Visa" | "Mastercard" | "Other";
+  holder_name: string;
+  last4: string;
+  exp_month: number;
+  exp_year: number;
+  is_default: boolean;
+  created_at: string;
+}
+
+function mapMethod(p: PaymentMethod): PaymentMethodRow {
+  return {
+    id: p.id,
+    brand: (p.brand as PaymentMethodRow["brand"]) ?? "Other",
+    holder_name: p.holder_name,
+    last4: p.last4 ?? "",
+    exp_month: p.exp_month,
+    exp_year: p.exp_year,
+    is_default: p.is_default,
+    created_at: p.created_at ? p.created_at.slice(0, 10) : "",
+  };
+}
 
 const BRAND_TINT: Record<string, string> = {
   Visa: "border-info/30 bg-info/10 text-info",
@@ -49,19 +82,42 @@ function maskCard(last4: string) {
 function PaymentMethodsPage() {
   const t = useT();
   const navigate = useNavigate();
-  const state = usePageState();
+  const previewState = usePageState();
   const { role } = usePermissions();
-  const { currentStoreId } = useApp();
+  const { currentStoreId, stores } = useApp();
+  const queryClient = useQueryClient();
   const [q, setQ] = useState("");
-  // STORE is implicitly scoped; STAFF/ADMIN must pick a store before the list loads.
+  // STORE is implicitly scoped; STAFF/ADMIN must pick a store before the list
+  // loads. The picker defaults to the topbar store (currentStoreId) when set.
   const isStore = role === "store";
-  const [storeFilter, setStoreFilter] = useState<string>(isStore ? "Beirut Pantry" : "");
+  const [storeFilter, setStoreFilter] = useState<string>(isStore ? "" : (currentStoreId ?? ""));
 
-  const scoped = useMemo(() => {
-    if (isStore) return PAYMENT_METHOD_ROWS.filter((p) => p.store === "Beirut Pantry");
-    if (!storeFilter) return [];
-    return PAYMENT_METHOD_ROWS.filter((p) => p.store === storeFilter);
-  }, [isStore, storeFilter]);
+  // store_id is omitted for STORE (BE auto-scopes); STAFF/ADMIN scope by picker.
+  const effectiveStoreId = isStore ? null : storeFilter || null;
+  const needsStore = !isStore && !storeFilter;
+
+  const methodsQuery = useQuery({
+    queryKey: ["payment-methods", effectiveStoreId, isStore],
+    queryFn: () => listPaymentMethods({ data: { store_id: effectiveStoreId, page_size: 200 } }),
+    enabled: isStore || !!storeFilter,
+    staleTime: 30 * 1000,
+  });
+
+  const setDefaultMutation = useMutation({
+    mutationFn: (id: string) => updatePaymentMethod({ data: { id, is_default: true } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["payment-methods"] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const removeMutation = useMutation({
+    mutationFn: (id: string) => deletePaymentMethod({ data: { id } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["payment-methods"] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  const scoped = useMemo(
+    () => (methodsQuery.data?.results ?? []).map(mapMethod),
+    [methodsQuery.data],
+  );
 
   const filtered = useMemo(
     () =>
@@ -73,7 +129,15 @@ function PaymentMethodsPage() {
 
   const active = scoped.length;
   const defaultMethod = scoped.find((p) => p.is_default);
-  const needsStore = !isStore && !storeFilter;
+
+  const state: PageState =
+    previewState !== "populated"
+      ? previewState
+      : methodsQuery.isLoading
+        ? "loading"
+        : methodsQuery.isError
+          ? "error"
+          : "populated";
 
   const columns: Column<PaymentMethodRow>[] = [
     {
@@ -141,7 +205,12 @@ function PaymentMethodsPage() {
             <Button
               className="bg-gradient-primary text-primary-foreground shadow-glow"
               disabled={needsStore}
-              onClick={() => navigate({ to: "/payment-methods/new" })}
+              onClick={() =>
+                navigate({
+                  to: "/payment-methods/new",
+                  search: { store_id: effectiveStoreId ?? undefined },
+                })
+              }
             >
               <Plus className="me-1.5 h-4 w-4" /> {t("finance.payments.addMethod")}
             </Button>
@@ -181,9 +250,9 @@ function PaymentMethodsPage() {
                   <SelectValue placeholder={t("finance.payments.storeFilter")} />
                 </SelectTrigger>
                 <SelectContent>
-                  {STORE_OPTIONS.map((s) => (
-                    <SelectItem key={s} value={s}>
-                      {s}
+                  {stores.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      {s.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -216,18 +285,30 @@ function PaymentMethodsPage() {
               columns={columns}
               getRowId={(p) => p.id}
               emptyState={<EmptyPayments />}
-              rowActions={(p) => <PaymentRowActions method={p} />}
+              rowActions={(p) => (
+                <PaymentRowActions
+                  method={p}
+                  onSetDefault={() => setDefaultMutation.mutate(p.id)}
+                  onDelete={() => removeMutation.mutate(p.id)}
+                />
+              )}
             />
           </PageStates>
         )}
       </div>
-      {/* currentStoreId reserved for store-scoped wire-up */}
-      <span className="hidden">{currentStoreId}</span>
     </div>
   );
 }
 
-function PaymentRowActions({ method }: { method: PaymentMethodRow }) {
+function PaymentRowActions({
+  method,
+  onSetDefault,
+  onDelete,
+}: {
+  method: PaymentMethodRow;
+  onSetDefault: () => void;
+  onDelete: () => void;
+}) {
   const t = useT();
   const navigate = useNavigate();
   const { has } = usePermissions();
@@ -246,7 +327,7 @@ function PaymentRowActions({ method }: { method: PaymentMethodRow }) {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-44">
         {!method.is_default && (
-          <DropdownMenuItem onClick={() => toast.success(t("finance.payments.defaultSet"))}>
+          <DropdownMenuItem onClick={onSetDefault}>
             <Star className="me-2 h-3.5 w-3.5" /> {t("finance.payments.setDefault")}
           </DropdownMenuItem>
         )}
@@ -266,7 +347,7 @@ function PaymentRowActions({ method }: { method: PaymentMethodRow }) {
           destructive
           typeToConfirm={method.last4 || method.brand}
           confirmLabel={t("finance.payments.delete")}
-          onConfirm={() => toast.success(t("finance.payments.deleted"))}
+          onConfirm={onDelete}
         />
       </DropdownMenuContent>
     </DropdownMenu>
@@ -290,7 +371,7 @@ function EmptyPayments() {
       <Can perm="payment_methods.update">
         <Button
           className="mt-5 bg-gradient-primary text-primary-foreground shadow-glow"
-          onClick={() => navigate({ to: "/payment-methods/new" })}
+          onClick={() => navigate({ to: "/payment-methods/new", search: { store_id: undefined } })}
         >
           <Plus className="me-1.5 h-4 w-4" /> {t("finance.payments.addMethod")}
         </Button>

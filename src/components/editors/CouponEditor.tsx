@@ -23,17 +23,36 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useApp } from "@/lib/app-context";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
 import {
-  CATEGORY_OPTIONS,
-  PRODUCT_OPTIONS,
-  PAYMENT_TYPES,
-  STORE_OPTIONS,
-  type CouponRow,
-} from "@/lib/mock/finance";
+  createCoupon,
+  updateCoupon,
+  type Coupon,
+  type CouponWriteInput,
+} from "@/lib/api/coupons.functions";
+
+// ENTRY 008: eligibility (categories / products / excluded / payment types) is
+// an accepted-but-DROPPED placeholder on the BE — the Coupon model does not
+// persist it. These option lists keep the §9.2 Eligibility tab rendering, but
+// the values never round-trip. No category/product picker endpoint is wired
+// because the backend would discard the selection anyway.
+const CATEGORY_OPTIONS = ["Pantry", "Spices", "Sweets", "Beverages", "Olive Oil", "Honey & Jam"];
+const PRODUCT_OPTIONS = [
+  "Saffron Threads",
+  "Cold-Pressed Olive Oil 1L",
+  "Rose Water 500ml",
+  "Sumac Powder 250g",
+  "Pomegranate Molasses 750ml",
+  "Pistachio Halva 400g",
+  "Za'atar Premium Blend",
+  "Tahini 600g",
+];
+const PAYMENT_TYPES = ["COD", "CC", "QR", "NS"] as const;
 
 interface Props {
   mode: "create" | "edit";
-  coupon?: CouponRow;
+  coupon?: Coupon;
   defaultScope?: "PLATFORM" | "STORE";
 }
 
@@ -74,36 +93,50 @@ function genCode() {
   return `${words[Math.floor(Math.random() * words.length)]}${Math.floor(10 + Math.random() * 89)}`;
 }
 
+// ISO datetime (with TZ) -> the datetime-local value the inputs expect.
+function toLocalInput(iso: string | null | undefined): string {
+  if (!iso) return "";
+  // Keep yyyy-MM-ddTHH:mm; drop seconds / timezone for the native input.
+  return iso.slice(0, 16);
+}
+
+function num(s: string | number | null | undefined): number | undefined {
+  if (s === null || s === undefined || s === "") return undefined;
+  const n = typeof s === "number" ? s : parseFloat(String(s));
+  return Number.isFinite(n) ? n : undefined;
+}
+
 export function CouponEditor({ mode, coupon, defaultScope }: Props) {
   const t = useT();
   const navigate = useNavigate();
   const { has } = usePermissions();
+  const { stores } = useApp();
+  const storeOptions = stores.map((s) => ({ id: s.id, name: s.name }));
   const canPlatform = has("coupons.create_platform");
-  const [selectedPayments, setSelectedPayments] = useState<string[]>(
-    coupon?.eligible_payment_types ?? ["COD", "CC"],
-  );
+  const [selectedPayments, setSelectedPayments] = useState<string[]>(["COD", "CC"]);
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: {
       code: coupon?.code ?? "",
       scope: coupon?.scope ?? defaultScope ?? "STORE",
-      store_id: coupon?.store ?? STORE_OPTIONS[0],
+      store_id: coupon?.store_id ?? storeOptions[0]?.id ?? "",
       discount_type: coupon?.discount_type ?? "PERCENTAGE",
-      discount_value: coupon?.discount_value ?? 15,
-      capped_at: coupon?.capped_at ?? undefined,
-      min_order_cost: coupon?.min_order_cost ?? 0,
+      discount_value: num(coupon?.discount_value) ?? 15,
+      capped_at: num(coupon?.capped_at),
+      min_order_cost: num(coupon?.min_order_cost) ?? 0,
       min_num_items: coupon?.min_num_items ?? 0,
-      applicable_categories: coupon?.applicable_categories ?? [],
-      applicable_products: coupon?.applicable_products ?? [],
-      excluded_products: coupon?.excluded_products ?? [],
-      new_customers_only: coupon?.new_customers_only ?? false,
-      eligible_payment_types: coupon?.eligible_payment_types ?? ["COD", "CC"],
+      // ENTRY 008 placeholders (not persisted by the BE).
+      applicable_categories: [],
+      applicable_products: [],
+      excluded_products: [],
+      new_customers_only: false,
+      eligible_payment_types: ["COD", "CC"],
       max_uses: coupon?.max_uses ?? 500,
       max_uses_per_user: coupon?.max_uses_per_user ?? 1,
       is_valid: coupon?.is_valid ?? true,
-      starts_at: coupon?.starts_at ?? "2026-06-01T00:00",
-      expires: coupon?.expires ?? "2026-12-31T23:59",
+      starts_at: toLocalInput(coupon?.starts_at) || "2026-06-01T00:00",
+      expires: toLocalInput(coupon?.expires) || "2026-12-31T23:59",
     },
   });
   const {
@@ -112,6 +145,7 @@ export function CouponEditor({ mode, coupon, defaultScope }: Props) {
     control,
     watch,
     setValue,
+    setError,
     formState: { errors, isSubmitting },
   } = form;
 
@@ -133,9 +167,62 @@ export function CouponEditor({ mode, coupon, defaultScope }: Props) {
     setValue("eligible_payment_types", next);
   }
 
-  function onSubmit(_values: Values) {
-    toast.success(t("finance.couponEditor.saved"));
-    navigate({ to: "/coupons" });
+  async function onSubmit(values: Values) {
+    // ENTRY 008: eligibility + starts_at are sent but DROPPED by the BE.
+    const payload: CouponWriteInput = {
+      code: values.code,
+      scope: values.scope,
+      store_id: values.scope === "STORE" ? values.store_id : undefined,
+      discount_type: values.discount_type,
+      discount_value: values.discount_value,
+      capped_at: values.discount_type === "PERCENTAGE" ? values.capped_at : undefined,
+      min_order_cost: values.min_order_cost,
+      min_num_items: values.min_num_items,
+      max_uses: values.max_uses,
+      max_uses_per_user: values.max_uses_per_user,
+      is_valid: values.is_valid,
+      starts_at: values.starts_at,
+      expires: values.expires,
+      eligible_category_ids: values.applicable_categories,
+      eligible_product_ids: values.applicable_products,
+      excluded_product_ids: values.excluded_products,
+      new_customers_only: values.new_customers_only,
+      eligible_payment_types: values.eligible_payment_types,
+    };
+    try {
+      if (mode === "edit" && coupon) {
+        await updateCoupon({ data: { ...payload, id: coupon.id } });
+      } else {
+        await createCoupon({ data: payload });
+      }
+      toast.success(t("finance.couponEditor.saved"));
+      navigate({ to: "/coupons" });
+    } catch (err) {
+      const info = parseServerError(err);
+      // Map server field errors onto the matching form fields.
+      const fieldKeys: (keyof Values)[] = [
+        "code",
+        "discount_type",
+        "discount_value",
+        "capped_at",
+        "min_order_cost",
+        "min_num_items",
+        "max_uses",
+        "max_uses_per_user",
+        "is_valid",
+        "expires",
+        "store_id",
+      ];
+      let mapped = false;
+      for (const key of fieldKeys) {
+        const msg = fieldMessage(info.fieldErrors, key as string);
+        if (msg) {
+          setError(key, { message: msg });
+          mapped = true;
+        }
+      }
+      if (!mapped) toast.error(info.message);
+    }
   }
 
   const expiresError =
@@ -245,9 +332,9 @@ export function CouponEditor({ mode, coupon, defaultScope }: Props) {
                           <SelectValue placeholder={t("finance.couponEditor.storePlaceholder")} />
                         </SelectTrigger>
                         <SelectContent>
-                          {STORE_OPTIONS.map((s) => (
-                            <SelectItem key={s} value={s}>
-                              {s}
+                          {storeOptions.map((s) => (
+                            <SelectItem key={s.id} value={s.id}>
+                              {s.name}
                             </SelectItem>
                           ))}
                         </SelectContent>
