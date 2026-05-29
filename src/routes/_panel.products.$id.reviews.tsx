@@ -66,7 +66,7 @@ function ProductReviewsPage() {
       header: t("products.colReviewRating"),
       sortValue: (r) => r.rating,
       cell: (r) => (
-        <div className="inline-flex items-center gap-0.5 text-amber-500">
+        <div className="inline-flex items-center gap-0.5 text-brand">
           {Array.from({ length: 5 }).map((_, i) => (
             <Star
               key={i}

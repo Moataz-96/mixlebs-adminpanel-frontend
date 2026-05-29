@@ -251,7 +251,7 @@ function ProductsPage() {
       cell: (p) =>
         p.ratingCount > 0 ? (
           <span className="inline-flex items-center gap-1 text-sm">
-            <Star className="h-3.5 w-3.5 fill-amber-500 text-amber-500" />
+            <Star className="h-3.5 w-3.5 fill-brand text-brand" />
             <span className="tabular-nums">{p.rating.toFixed(1)}</span>
             <span className="text-xs text-muted-foreground">({p.ratingCount})</span>
           </span>

@@ -31,6 +31,8 @@
   --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-success: var(--success);
@@ -77,8 +79,12 @@
   --secondary-foreground: oklch(0.25 0.03 250);
   --muted: oklch(0.96 0.008 250);
   --muted-foreground: oklch(0.5 0.02 250);
-  --accent: hsl(306, 63%, 44%);
-  --accent-foreground: hsl(0, 0%, 100%);
+  --accent: hsl(258, 40%, 95%);
+  --accent-foreground: hsl(258, 44%, 38%);
+
+  /* Magenta — the app's vivid "second" brand color (review stars, highlights) */
+  --brand: hsl(306, 63%, 44%);
+  --brand-foreground: hsl(0, 0%, 100%);
 
   --destructive: oklch(0.6 0.22 25);
   --destructive-foreground: oklch(0.98 0 0);
@@ -137,8 +143,11 @@
   --secondary-foreground: oklch(0.96 0.008 80);
   --muted: oklch(0.23 0.022 255);
   --muted-foreground: oklch(0.68 0.02 250);
-  --accent: hsl(306, 63%, 50%);
-  --accent-foreground: hsl(0, 0%, 100%);
+  --accent: hsl(258, 22%, 26%);
+  --accent-foreground: hsl(0, 0%, 96%);
+
+  --brand: hsl(306, 63%, 50%);
+  --brand-foreground: hsl(0, 0%, 100%);
 
   --destructive: oklch(0.65 0.22 25);
   --destructive-foreground: oklch(0.98 0 0);

@@ -128,7 +128,7 @@ function SupportPage() {
       cell: (s) =>
         s.rating != null ? (
           <span className="inline-flex items-center gap-1 text-xs font-medium">
-            <Star className="h-3.5 w-3.5 fill-warning text-warning" /> {s.rating}
+            <Star className="h-3.5 w-3.5 fill-brand text-brand" /> {s.rating}
           </span>
         ) : (
           <span className="text-muted-foreground">—</span>
