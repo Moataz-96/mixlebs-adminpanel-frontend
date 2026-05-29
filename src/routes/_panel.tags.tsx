@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { Plus, Tags as TagsIcon, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -15,7 +16,35 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useT } from "@/lib/i18n";
 import { usePageState } from "@/lib/page-state";
-import { TAGS_FULL, type TagRow } from "@/lib/mock/catalog";
+import { listTags, type Page, type TagItem } from "@/lib/api/catalog.functions";
+
+// Row shape the §7.9 table consumes (was mock/catalog TagRow). `products` and
+// `store` are not surfaced by the global /tags/ list (StoreTag has no aggregate
+// product count nor a store FK on the global endpoint) — see
+// required_adminpanel_change.md (P4 Wire). They render as static placeholders
+// (0 / null) until the BE exposes them.
+interface TagRow {
+  id: string;
+  name: string;
+  products: number;
+  store: string | null;
+  created_at: string;
+}
+
+function unpage<T>(p: Page<T> | T[] | undefined): T[] {
+  if (!p) return [];
+  return Array.isArray(p) ? p : p.results;
+}
+
+function mapTag(t: TagItem): TagRow {
+  return {
+    id: String(t.id),
+    name: t.name,
+    products: 0,
+    store: null,
+    created_at: t.created_at ? t.created_at.slice(0, 10) : "",
+  };
+}
 
 export const Route = createFileRoute("/_panel/tags")({
   head: () => ({ meta: [{ title: "Tags — Mixlebs Admin" }] }),
@@ -28,9 +57,23 @@ function TagsPage() {
   const { role } = usePermissions();
   const canSeeStore = role === "admin" || role === "staff";
 
-  const [rows, setRows] = useState<TagRow[]>(TAGS_FULL);
+  const tagsQuery = useQuery({
+    queryKey: ["tags"],
+    queryFn: () => listTags(),
+    staleTime: 60 * 1000,
+  });
+  const [overlay, setOverlay] = useState<TagRow[]>([]);
+  const [removed, setRemoved] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState("");
+
+  // Live /tags/ rows, plus optimistic local add/remove (global tag CRUD is not
+  // exposed by the BE — the add/remove buttons stay client-side; see
+  // required_adminpanel_change.md).
+  const rows = useMemo<TagRow[]>(() => {
+    const live = unpage(tagsQuery.data).map(mapTag);
+    return [...overlay, ...live].filter((r) => !removed.has(r.id));
+  }, [tagsQuery.data, overlay, removed]);
 
   const filtered = useMemo(
     () => rows.filter((r) => r.name.toLowerCase().includes(q.toLowerCase())),
@@ -41,7 +84,7 @@ function TagsPage() {
   function add() {
     const name = draft.trim().toLowerCase();
     if (!name || rows.some((r) => r.name === name)) return;
-    setRows((rs) => [
+    setOverlay((rs) => [
       {
         id: `tg_${Date.now()}`,
         name,
@@ -56,7 +99,8 @@ function TagsPage() {
   }
 
   function remove(row: TagRow) {
-    setRows((rs) => rs.filter((r) => r.id !== row.id));
+    setOverlay((rs) => rs.filter((r) => r.id !== row.id));
+    setRemoved((s) => new Set(s).add(row.id));
     toast.success(t("catalog.tags.deleted"));
   }
 

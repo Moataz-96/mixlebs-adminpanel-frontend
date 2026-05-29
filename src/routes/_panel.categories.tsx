@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
   ChevronRight,
@@ -34,12 +35,66 @@ import {
 } from "@/components/ui/select";
 import { useT } from "@/lib/i18n";
 import { usePageState } from "@/lib/page-state";
+import { parseServerError } from "@/lib/api/error";
 import {
-  CATEGORY_TREE,
-  CATEGORY_SUGGESTION_LOG,
-  PROPERTIES_FULL,
-  type CategoryNode,
-} from "@/lib/mock/catalog";
+  listCategories,
+  updateCategory,
+  createCategory,
+  listProperties,
+  listCategoryProperties,
+  type CategoryItem,
+  type CategoryPropertyItem,
+  type PropertyItem,
+  type Page,
+} from "@/lib/api/catalog.functions";
+
+// Tree-node shape the §7.6 screen consumes (was mock/catalog CategoryNode).
+interface CategoryNode {
+  id: string;
+  parent_id: string | null;
+  identifier: string;
+  name: string;
+  products: number;
+  is_published: boolean;
+  returns: boolean;
+  translations: { lang: string; name: string; description: string }[];
+  properties: {
+    id: string;
+    property: string;
+    is_required: boolean;
+    is_characteristic: boolean;
+    characteristic_order: number;
+  }[];
+}
+
+// The property-suggestion log has no BE endpoint — rendered empty (static
+// placeholder) until the BE exposes it; see required_adminpanel_change.md.
+const CATEGORY_SUGGESTION_LOG: { id: string; property: string; suggested_by: string; at: string }[] =
+  [];
+
+function unpage<T>(p: Page<T> | T[] | undefined): T[] {
+  if (!p) return [];
+  return Array.isArray(p) ? p : p.results;
+}
+function mapCategory(c: CategoryItem): CategoryNode {
+  return {
+    id: String(c.id),
+    parent_id: c.parent != null ? String(c.parent) : null,
+    identifier: c.identifier,
+    name: c.name,
+    products: 0,
+    is_published: c.is_published,
+    returns: c.returns,
+    translations: (c.translations ?? []).map((tr) => ({
+      lang: tr.language_code,
+      name: tr.name,
+      description: tr.description,
+    })),
+    // category-properties are loaded lazily per-node in the detail pane; the
+    // tree itself does not need them.
+    properties: [],
+  };
+}
 
 export const Route = createFileRoute("/_panel/categories")({
   head: () => ({ meta: [{ title: "Categories — Mixlebs Admin" }] }),
@@ -56,15 +111,44 @@ function CategoriesPage() {
   const state = usePageState();
   const { has } = usePermissions();
   const canEdit = has("categories.update");
+  const queryClient = useQueryClient();
 
-  const [nodes] = useState<CategoryNode[]>(CATEGORY_TREE);
+  const createMutation = useMutation({
+    mutationFn: () =>
+      createCategory({
+        data: { identifier: `category-${Date.now()}`, is_published: false, returns: false },
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["categories"] });
+      toast.success(t("catalog.categories.saved"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  const categoriesQuery = useQuery({
+    queryKey: ["categories"],
+    queryFn: () => listCategories({ data: { page_size: 200 } }),
+    staleTime: 60 * 1000,
+  });
+  const nodes = useMemo<CategoryNode[]>(
+    () => (categoriesQuery.data?.results ?? []).map(mapCategory),
+    [categoriesQuery.data],
+  );
   const roots = useMemo(() => nodes.filter((n) => !n.parent_id), [nodes]);
   const childrenOf = (id: string) => nodes.filter((n) => n.parent_id === id);
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(roots.map((r) => [r.id, true])),
   );
-  const [selectedId, setSelectedId] = useState<string | null>(roots[0]?.id ?? null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Once the live tree resolves, default the selection + expand roots (the
+  // useState initializers ran before the query returned).
+  useEffect(() => {
+    if (selectedId === null && roots[0]?.id) {
+      setSelectedId(roots[0].id);
+      setExpanded((e) => ({ ...e, ...Object.fromEntries(roots.map((r) => [r.id, true])) }));
+    }
+  }, [roots, selectedId]);
   const selected = nodes.find((n) => n.id === selectedId) ?? null;
 
   function setAll(open: boolean) {
@@ -87,7 +171,8 @@ function CategoriesPage() {
             {canEdit && (
               <Button
                 className="bg-gradient-primary text-primary-foreground shadow-glow"
-                onClick={() => toast.success(t("catalog.categories.saved"))}
+                disabled={createMutation.isPending}
+                onClick={() => createMutation.mutate()}
               >
                 <Plus className="me-1.5 h-4 w-4" /> {t("catalog.categories.newTopLevel")}
               </Button>
@@ -138,7 +223,7 @@ function CategoriesPage() {
 
           {/* RIGHT — detail */}
           {selected ? (
-            <CategoryDetail key={selected.id} node={selected} canEdit={canEdit} />
+            <CategoryDetail key={selected.id} node={selected} nodes={nodes} canEdit={canEdit} />
           ) : (
             <Card className="grid place-items-center border-0 p-10 text-center shadow-soft">
               <p className="text-sm text-muted-foreground">{t("catalog.categories.selectHint")}</p>
@@ -237,16 +322,61 @@ function TreeNode({
   );
 }
 
-function CategoryDetail({ node, canEdit }: { node: CategoryNode; canEdit: boolean }) {
+function CategoryDetail({
+  node,
+  nodes,
+  canEdit,
+}: {
+  node: CategoryNode;
+  nodes: CategoryNode[];
+  canEdit: boolean;
+}) {
   const t = useT();
+  const queryClient = useQueryClient();
   const [returns, setReturns] = useState(node.returns);
   const [published, setPublished] = useState(node.is_published);
-  const [props, setProps] = useState(node.properties);
-  const parentOptions = CATEGORY_TREE.filter((c) => c.id !== node.id);
+  const parentOptions = nodes.filter((c) => c.id !== node.id);
   const fieldDisabled = !canEdit;
 
+  // Category-properties for this node (nested endpoint). Falls back to [] until
+  // it resolves; add/remove stay local (full nested CRUD is light here).
+  const propsQuery = useQuery({
+    queryKey: ["categories", node.id, "properties"],
+    queryFn: () => listCategoryProperties({ data: { categoryId: Number(node.id) } }),
+    staleTime: 30 * 1000,
+  });
+  const allPropsQuery = useQuery({
+    queryKey: ["properties"],
+    queryFn: () => listProperties(),
+    staleTime: 60 * 1000,
+  });
+  const [props, setProps] = useState(node.properties);
+  useEffect(() => {
+    const live = unpage<CategoryPropertyItem>(propsQuery.data).map((cp) => ({
+      id: String(cp.id),
+      property: String(cp.property_key ?? cp.property),
+      is_required: !!cp.is_required,
+      is_characteristic: !!cp.is_characteristic,
+      characteristic_order: Number(cp.characteristic_order ?? 0),
+    }));
+    if (live.length) setProps(live);
+  }, [propsQuery.data]);
+
+  const saveMutation = useMutation({
+    mutationFn: () =>
+      updateCategory({
+        data: { id: Number(node.id), body: { returns, is_published: published } },
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["categories"] });
+      toast.success(t("catalog.categories.saved"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
   function addProperty() {
-    const free = PROPERTIES_FULL.find((p) => !props.some((x) => x.property === p.key));
+    const available = unpage<PropertyItem>(allPropsQuery.data);
+    const free = available.find((p) => !props.some((x) => x.property === p.key));
     if (!free) return;
     setProps((ps) => [
       ...ps,
@@ -270,7 +400,8 @@ function CategoryDetail({ node, canEdit }: { node: CategoryNode; canEdit: boolea
           <Button
             size="sm"
             className="bg-gradient-primary text-primary-foreground"
-            onClick={() => toast.success(t("catalog.categories.saved"))}
+            disabled={saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
           >
             {t("common.save")}
           </Button>

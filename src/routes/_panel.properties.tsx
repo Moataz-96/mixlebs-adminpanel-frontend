@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Sliders, Check, Minus, Pencil } from "lucide-react";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -34,12 +35,67 @@ import {
 } from "@/components/ui/select";
 import { useT } from "@/lib/i18n";
 import { usePageState } from "@/lib/page-state";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
 import {
-  PROPERTIES_FULL,
-  PROP_DATA_TYPES,
-  PROP_FIELD_TYPES,
-  type PropertyRow,
-} from "@/lib/mock/catalog";
+  listProperties,
+  createProperty,
+  updateProperty,
+  type Page,
+  type PropertyItem,
+} from "@/lib/api/catalog.functions";
+
+// Row shape the §7.7 table/editor consume (was mock/catalog PropertyRow).
+// `values` (the value list) and `used` (usage count) are aggregates the
+// /properties/ endpoint does not expose — see required_adminpanel_change.md
+// (P4 Wire). They render as static placeholders ([] / 0).
+type PropDataType = "string" | "number" | "boolean" | "date";
+type PropFieldType = "text" | "select" | "multiselect" | "toggle" | "number";
+interface PropertyRow {
+  id: string;
+  key: string;
+  placeholder: string;
+  is_multilingual: boolean;
+  is_multi_value: boolean;
+  is_attribute: boolean;
+  is_modifiable: boolean;
+  data_type: PropDataType;
+  field_type: PropFieldType;
+  used: number;
+  values: string[];
+  translations: { lang: string; label: string }[];
+}
+
+const PROP_DATA_TYPES: PropDataType[] = ["string", "number", "boolean", "date"];
+const PROP_FIELD_TYPES: PropFieldType[] = ["text", "select", "multiselect", "toggle", "number"];
+
+function unpage<T>(p: Page<T> | T[] | undefined): T[] {
+  if (!p) return [];
+  return Array.isArray(p) ? p : p.results;
+}
+function coerceDataType(v: string): PropDataType {
+  const l = (v || "").toLowerCase();
+  return (PROP_DATA_TYPES as string[]).includes(l) ? (l as PropDataType) : "string";
+}
+function coerceFieldType(v: string): PropFieldType {
+  const l = (v || "").toLowerCase();
+  return (PROP_FIELD_TYPES as string[]).includes(l) ? (l as PropFieldType) : "text";
+}
+function mapProperty(p: PropertyItem): PropertyRow {
+  return {
+    id: String(p.id),
+    key: p.key,
+    placeholder: p.placeholder ?? "",
+    is_multilingual: p.is_multilingual,
+    is_multi_value: p.is_multi_value,
+    is_attribute: p.is_attribute,
+    is_modifiable: p.is_modifiable,
+    data_type: coerceDataType(p.data_type),
+    field_type: coerceFieldType(p.field_type),
+    used: 0,
+    values: [],
+    translations: (p.translations ?? []).map((tr) => ({ lang: tr.language_code, label: tr.key })),
+  };
+}
 
 export const Route = createFileRoute("/_panel/properties")({
   head: () => ({ meta: [{ title: "Properties — Mixlebs Admin" }] }),
@@ -72,9 +128,19 @@ function PropertiesPage() {
   const [q, setQ] = useState("");
   const [editing, setEditing] = useState<PropertyRow | "new" | null>(null);
 
+  const propsQuery = useQuery({
+    queryKey: ["properties"],
+    queryFn: () => listProperties(),
+    staleTime: 60 * 1000,
+  });
+  const rows = useMemo<PropertyRow[]>(
+    () => unpage<PropertyItem>(propsQuery.data).map(mapProperty),
+    [propsQuery.data],
+  );
+
   const filtered = useMemo(
-    () => PROPERTIES_FULL.filter((p) => p.key.toLowerCase().includes(q.toLowerCase())),
-    [q],
+    () => rows.filter((p) => p.key.toLowerCase().includes(q.toLowerCase())),
+    [rows, q],
   );
 
   const Bool = ({ v }: { v: boolean }) =>
@@ -162,17 +228,17 @@ function PropertiesPage() {
       <div className="grid gap-4 md:grid-cols-3">
         <KpiCard
           label={t("catalog.properties.kpiKeys")}
-          value={PROPERTIES_FULL.length}
+          value={rows.length}
           icon={<Sliders className="h-5 w-5" />}
           accent
         />
         <KpiCard
           label={t("catalog.properties.kpiValues")}
-          value={PROPERTIES_FULL.reduce((a, p) => a + p.values.length, 0)}
+          value={rows.reduce((a, p) => a + p.values.length, 0)}
         />
         <KpiCard
           label={t("catalog.properties.kpiInUse")}
-          value={PROPERTIES_FULL.reduce((a, p) => a + p.used, 0)}
+          value={rows.reduce((a, p) => a + p.used, 0)}
           delta={t("catalog.properties.inUseDelta")}
         />
       </div>
@@ -260,12 +326,44 @@ function PropertyEditor({
     handleSubmit,
     control,
     reset,
+    setError,
     formState: { errors, isSubmitting },
   } = form;
+  const queryClient = useQueryClient();
 
-  function submit(_v: Values) {
-    toast.success(t("catalog.properties.saved"));
-    onClose();
+  const mutation = useMutation({
+    mutationFn: (v: Values) => {
+      const body: Record<string, unknown> = {
+        key: v.key,
+        placeholder: v.placeholder,
+        is_multilingual: v.is_multilingual,
+        is_multi_value: v.is_multi_value,
+        is_attribute: v.is_attribute,
+        is_modifiable: v.is_modifiable,
+        data_type: v.data_type,
+        field_type: v.field_type,
+      };
+      return property
+        ? updateProperty({ data: { id: Number(property.id), body } })
+        : createProperty({ data: body });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["properties"] });
+      toast.success(t("catalog.properties.saved"));
+      onClose();
+    },
+    onError: (err) => {
+      const info = parseServerError(err);
+      (["key", "placeholder", "data_type", "field_type"] as const).forEach((f) => {
+        const msg = fieldMessage(info.fieldErrors, f);
+        if (msg) setError(f, { message: msg });
+      });
+      toast.error(info.message);
+    },
+  });
+
+  function submit(v: Values) {
+    mutation.mutate(v);
   }
 
   return (
@@ -401,7 +499,7 @@ function PropertyEditor({
           <Button
             type="submit"
             form="property-form"
-            disabled={isSubmitting}
+            disabled={isSubmitting || mutation.isPending}
             className="bg-gradient-primary text-primary-foreground"
           >
             {t("common.save")}

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
   Layers,
@@ -37,7 +38,15 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { usePageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
-import { COLLECTIONS_FULL, DISPLAY_STYLES, type CollectionRow } from "@/lib/mock/catalog";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listCollections,
+  updateCollection,
+  deleteCollection,
+  mapCollection,
+  DISPLAY_STYLES,
+  type CollectionRow,
+} from "@/lib/api/collections.functions";
 
 export const Route = createFileRoute("/_panel/collections")({
   head: () => ({ meta: [{ title: "Collections — Mixlebs Admin" }] }),
@@ -50,7 +59,16 @@ function CollectionsPage() {
   const state = usePageState();
   const { has } = usePermissions();
 
-  const [rows, setRows] = useState<CollectionRow[]>(COLLECTIONS_FULL);
+  const queryClient = useQueryClient();
+  const collectionsQuery = useQuery({
+    queryKey: ["collections"],
+    queryFn: () => listCollections(),
+    staleTime: 30 * 1000,
+  });
+  const rows = useMemo<CollectionRow[]>(
+    () => (collectionsQuery.data?.results ?? []).map(mapCollection),
+    [collectionsQuery.data],
+  );
   const [q, setQ] = useState("");
   const [scope, setScope] = useState<string>("all");
   const [active, setActive] = useState<string>("all");
@@ -72,18 +90,34 @@ function CollectionsPage() {
     [rows, q, scope, active, display],
   );
 
+  const toggleMutation = useMutation({
+    mutationFn: (row: CollectionRow) =>
+      updateCollection({ data: { id: Number(row.id), body: { is_active: !row.is_active } } }),
+    onSuccess: (_d, row) => {
+      void queryClient.invalidateQueries({ queryKey: ["collections"] });
+      toast.success(
+        row.is_active
+          ? t("catalog.collections.toggledInactive")
+          : t("catalog.collections.toggledActive"),
+      );
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const deleteMutation = useMutation({
+    mutationFn: (row: CollectionRow) => deleteCollection({ data: { id: Number(row.id) } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["collections"] });
+      toast.success(t("catalog.collections.deleted"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
   function toggleActive(row: CollectionRow) {
-    setRows((rs) => rs.map((r) => (r.id === row.id ? { ...r, is_active: !r.is_active } : r)));
-    toast.success(
-      row.is_active
-        ? t("catalog.collections.toggledInactive")
-        : t("catalog.collections.toggledActive"),
-    );
+    toggleMutation.mutate(row);
   }
 
   function remove(row: CollectionRow) {
-    setRows((rs) => rs.filter((r) => r.id !== row.id));
-    toast.success(t("catalog.collections.deleted"));
+    deleteMutation.mutate(row);
   }
 
   const columns: Column<CollectionRow>[] = [

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Upload,
   ImageIcon,
@@ -59,7 +60,74 @@ import {
 } from "@/components/ui/select";
 import { useT } from "@/lib/i18n";
 import { usePageState } from "@/lib/page-state";
-import { ASSETS_FULL, ASSET_DIMENSION_BUCKETS, type AssetRow } from "@/lib/mock/catalog";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listAssets,
+  shareAsset,
+  deleteAsset,
+  uploadAsset,
+  type AssetItem,
+  type Page,
+} from "@/lib/api/assets.functions";
+
+// Row shape the §7.10 grid/table consume (was mock/catalog AssetRow). The
+// Asset endpoint provides url / dimensions / usage_count / is_enhanced /
+// is_shared / app_field / created_at. `size_kb`, `uploaded_by`, `store`, and
+// the `used_by[]` cross-reference list are NOT surfaced by the BE — see
+// required_adminpanel_change.md (P4 Wire). They render as static placeholders.
+interface AssetRow {
+  id: string;
+  filename: string;
+  app_field: string;
+  width: number;
+  height: number;
+  size_kb: number;
+  usage_count: number;
+  is_enhanced: boolean;
+  is_shared: boolean;
+  uploaded_by: string;
+  store: string | null;
+  created_at: string;
+  used_by: { id: string; label: string; kind: string }[];
+}
+
+const ASSET_DIMENSION_BUCKETS = ["any", "square", "landscape", "portrait", "icon"] as const;
+
+function unpage<T>(p: Page<T> | T[] | undefined): T[] {
+  if (!p) return [];
+  return Array.isArray(p) ? p : p.results;
+}
+function parseDims(d: string | null): { w: number; h: number } {
+  if (!d) return { w: 0, h: 0 };
+  const m = d.match(/(\d+)\s*[x×]\s*(\d+)/i);
+  return m ? { w: Number(m[1]), h: Number(m[2]) } : { w: 0, h: 0 };
+}
+function filenameOf(a: AssetItem): string {
+  if (a.title) return a.title;
+  if (a.url) {
+    const parts = a.url.split(/[/\\?#]/).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
+  return `asset-${a.id}`;
+}
+function mapAsset(a: AssetItem): AssetRow {
+  const { w, h } = parseDims(a.dimensions);
+  return {
+    id: String(a.id),
+    filename: filenameOf(a),
+    app_field: a.app_field,
+    width: w,
+    height: h,
+    size_kb: 0,
+    usage_count: a.usage_count,
+    is_enhanced: a.is_enhanced,
+    is_shared: a.is_shared,
+    uploaded_by: "—",
+    store: null,
+    created_at: a.created_at ? a.created_at.slice(0, 10) : "",
+    used_by: [],
+  };
+}
 
 export const Route = createFileRoute("/_panel/assets")({
   head: () => ({ meta: [{ title: "Asset library — Mixlebs Admin" }] }),
@@ -74,7 +142,16 @@ function AssetsPage() {
   const { role, has } = usePermissions();
   const canSeeStore = role === "admin" || role === "staff";
 
-  const [rows, setRows] = useState<AssetRow[]>(ASSETS_FULL);
+  const queryClient = useQueryClient();
+  const assetsQuery = useQuery({
+    queryKey: ["assets"],
+    queryFn: () => listAssets(),
+    staleTime: 30 * 1000,
+  });
+  const rows = useMemo<AssetRow[]>(
+    () => unpage<AssetItem>(assetsQuery.data).map(mapAsset),
+    [assetsQuery.data],
+  );
   const [view, setView] = useState<"grid" | "table">("grid");
   const [q, setQ] = useState("");
   const [field, setField] = useState("all");
@@ -102,9 +179,25 @@ function AssetsPage() {
     });
   }, [rows, q, field, enhanced, shared, dim]);
 
+  const shareMutation = useMutation({
+    mutationFn: (a: AssetRow) => shareAsset({ data: { id: Number(a.id) } }),
+    onSuccess: (_d, a) => {
+      void queryClient.invalidateQueries({ queryKey: ["assets"] });
+      toast.success(a.is_shared ? t("catalog.assets.unshared") : t("catalog.assets.shared"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const deleteMutation = useMutation({
+    mutationFn: (a: AssetRow) => deleteAsset({ data: { id: Number(a.id) } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["assets"] });
+      toast.success(t("catalog.assets.deleted"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
   function toggleShare(a: AssetRow) {
-    setRows((rs) => rs.map((r) => (r.id === a.id ? { ...r, is_shared: !r.is_shared } : r)));
-    toast.success(a.is_shared ? t("catalog.assets.unshared") : t("catalog.assets.shared"));
+    shareMutation.mutate(a);
   }
   function copyUrl(a: AssetRow) {
     void navigator.clipboard?.writeText(`https://cdn.mixlebs.com/assets/${a.id}/${a.filename}`);
@@ -115,8 +208,7 @@ function AssetsPage() {
       toast.error(t("catalog.assets.deleteBlocked", { n: a.usage_count }));
       return;
     }
-    setRows((rs) => rs.filter((r) => r.id !== a.id));
-    toast.success(t("catalog.assets.deleted"));
+    deleteMutation.mutate(a);
   }
 
   const columns: Column<AssetRow>[] = [
@@ -479,6 +571,33 @@ function Thumb({ className }: { className?: string }) {
 function UploadDialog() {
   const t = useT();
   const [open, setOpen] = useState(false);
+  const queryClient = useQueryClient();
+
+  const uploadMutation = useMutation({
+    mutationFn: async (files: FileList) => {
+      // Read each picked file as a data URL so it survives the createServerFn
+      // JSON boundary, then the server fn rebuilds FormData for the multipart
+      // POST. Reuses the existing storage pipeline (local dev / S3 prod).
+      const toDataUrl = (f: File) =>
+        new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(f);
+        });
+      for (const f of Array.from(files)) {
+        const dataUrl = await toDataUrl(f);
+        await uploadAsset({ data: { dataUrl, filename: f.name, app_field: "PRODUCTS" } });
+      }
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["assets"] });
+      toast.success(t("catalog.assets.shared"));
+      setOpen(false);
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -499,9 +618,10 @@ function UploadDialog() {
             multiple
             className="sr-only"
             aria-label={t("catalog.assets.uploadAria")}
-            onChange={() => {
-              toast.success(t("catalog.assets.shared"));
-              setOpen(false);
+            onChange={(e) => {
+              if (e.target.files && e.target.files.length > 0) {
+                uploadMutation.mutate(e.target.files);
+              }
             }}
           />
         </label>

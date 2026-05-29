@@ -9,6 +9,8 @@ export type OrderStatus =
   | "DECLINED"
   | "DELIVERY_ISSUE";
 
+// removed: P4 Wire — `Product` is now defined in components/editors/ProductEditor.tsx
+// and mapped from the BE ProductDetail. No catalog screen imports this anymore.
 export interface Product {
   id: string;
   name: string;
@@ -22,6 +24,7 @@ export interface Product {
   updated: string;
 }
 
+// removed: P4 Wire — products are fetched live via listProducts(); no consumer left.
 export const PRODUCTS: Product[] = [
   {
     id: "p_001",
@@ -316,12 +319,14 @@ export const COUPONS: Coupon[] = [
   },
 ];
 
+// removed: P4 Wire — categories fetched live via listCategories(); no consumer left.
 export interface Category {
   id: string;
   name: string;
   parent?: string;
   products: number;
 }
+// removed: P4 Wire
 export const CATEGORIES: Category[] = [
   { id: "cat_01", name: "Pantry", products: 142 },
   { id: "cat_02", name: "Spices", products: 88 },
@@ -331,6 +336,7 @@ export const CATEGORIES: Category[] = [
   { id: "cat_06", name: "Honey & Jam", parent: "Pantry", products: 19 },
 ];
 
+// removed: P4 Wire — collections fetched live via listCollections(); no consumer left.
 export const COLLECTIONS = [
   {
     id: "col_01",
@@ -350,12 +356,14 @@ export const COLLECTIONS = [
   { id: "col_03", name: "Cold Pressed Oils", scope: "PLATFORM", products: 9, status: "DRAFT" },
 ];
 
+// removed: P4 Wire — properties fetched live via listProperties(); no consumer left.
 export const PROPERTIES = [
   { id: "pr_01", key: "Weight", values: ["100g", "250g", "500g", "1kg"], used: 84 },
   { id: "pr_02", key: "Origin", values: ["Lebanon", "Syria", "Iran", "Turkey"], used: 56 },
   { id: "pr_03", key: "Roast", values: ["Light", "Medium", "Dark"], used: 12 },
 ];
 
+// removed: P4 Wire — tag suggestions sourced live; no catalog consumer left.
 export const TAGS = ["new", "best-seller", "organic", "vegan", "halal", "gluten-free", "limited"];
 
 export const RETURNS = [

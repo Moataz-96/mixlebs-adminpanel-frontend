@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -36,7 +37,13 @@ import {
 } from "@/components/ui/select";
 import { useT } from "@/lib/i18n";
 import { useApp } from "@/lib/app-context";
-import { DISPLAY_STYLES, type CollectionRow } from "@/lib/mock/catalog";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
+import {
+  createCollection,
+  updateCollection,
+  DISPLAY_STYLES,
+  type CollectionRow,
+} from "@/lib/api/collections.functions";
 
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -85,6 +92,8 @@ export function CollectionEditor({
   initialScope?: "STORE" | "PLATFORM";
 }) {
   const t = useT();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { has } = usePermissions();
   const { stores } = useApp();
   const canPlatform = has("collections.create_platform");
@@ -94,13 +103,17 @@ export function CollectionEditor({
     defaultValues: {
       title: value?.title ?? "",
       slug: value?.slug ?? "",
-      description: "",
-      collection_type: value?.collection_type ?? "manual",
+      description: value?.description ?? "",
+      collection_type:
+        value?.collection_type === "smart" || value?.collection_type === "manual"
+          ? value.collection_type
+          : "manual",
       scope: value?.scope ?? initialScope ?? (canPlatform ? "PLATFORM" : "STORE"),
-      store_id: value?.store ? "str_01" : "",
-      display_style: value?.display_style ?? "grid",
+      store_id: value?.store ?? "",
+      display_style:
+        (value?.display_style as Values["display_style"]) ?? "grid",
       priority: value?.priority ?? 0,
-      metadata: "",
+      metadata: value?.metadata ? JSON.stringify(value.metadata) : "",
       starts_at: value?.starts_at ?? "",
       ends_at: value?.ends_at ?? "",
       is_active: value?.is_active ?? true,
@@ -112,13 +125,59 @@ export function CollectionEditor({
     handleSubmit,
     control,
     watch,
+    setError,
     formState: { errors, isSubmitting },
   } = form;
   const collectionType = watch("collection_type");
   const currentScope = watch("scope");
 
-  function onSubmit(_values: Values) {
-    toast.success(t("catalog.colEditor.saved"));
+  const mutation = useMutation({
+    mutationFn: (values: Values) => {
+      let metadata: Record<string, unknown> = {};
+      if (values.metadata.trim()) {
+        try {
+          metadata = JSON.parse(values.metadata) as Record<string, unknown>;
+        } catch {
+          metadata = {};
+        }
+      }
+      const body: Record<string, unknown> = {
+        title: values.title,
+        slug: values.slug,
+        description: values.description,
+        collection_type: values.collection_type,
+        scope: values.scope === "STORE" ? "store" : "global",
+        store: values.scope === "STORE" ? values.store_id : null,
+        display_style: values.display_style,
+        priority: values.priority,
+        metadata,
+        starts_at: values.starts_at ? values.starts_at : null,
+        ends_at: values.ends_at ? values.ends_at : null,
+        is_active: values.is_active,
+      };
+      return mode === "edit" && value
+        ? updateCollection({ data: { id: Number(value.id), body } })
+        : createCollection({ data: body });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["collections"] });
+      toast.success(t("catalog.colEditor.saved"));
+      void navigate({ to: "/collections" });
+    },
+    onError: (err) => {
+      const info = parseServerError(err);
+      (["title", "slug", "description", "priority"] as const).forEach((f) => {
+        const msg = fieldMessage(info.fieldErrors, f);
+        if (msg) setError(f, { message: msg });
+      });
+      const storeMsg = fieldMessage(info.fieldErrors, "store");
+      if (storeMsg) setError("store_id", { message: storeMsg });
+      toast.error(info.message);
+    },
+  });
+
+  function onSubmit(values: Values) {
+    mutation.mutate(values);
   }
 
   return (
@@ -139,7 +198,7 @@ export function CollectionEditor({
             </Button>
             <Button
               onClick={handleSubmit(onSubmit)}
-              disabled={isSubmitting}
+              disabled={isSubmitting || mutation.isPending}
               className="bg-gradient-primary text-primary-foreground shadow-glow"
             >
               <Save className="me-1.5 h-4 w-4" /> {t("common.save")}

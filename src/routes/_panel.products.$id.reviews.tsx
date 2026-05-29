@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Star, EyeOff, Eye, MessageSquare } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -20,7 +21,42 @@ import {
 } from "@/components/ui/select";
 import { usePageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
-import { PRODUCT_ROWS, PRODUCT_REVIEWS, type ProductReview } from "@/lib/mock/products";
+import {
+  getProduct,
+  listProductReviews,
+  type Page,
+  type ProductReviewItem,
+} from "@/lib/api/catalog.functions";
+
+// Row shape the §7.3 reviews table consumes (was mock/products ProductReview).
+// The BE ProductReview has no reviewer display name or a hide flag (review
+// moderation is a P8 concern) — `customer` shows the customer id and `hidden`
+// is false; see required_adminpanel_change.md.
+interface ProductReview {
+  id: string;
+  customer: string;
+  rating: number;
+  comment: string;
+  isPurchased: boolean;
+  createdAt: string;
+  hidden: boolean;
+}
+
+function unpage<T>(p: Page<T> | T[] | undefined): T[] {
+  if (!p) return [];
+  return Array.isArray(p) ? p : p.results;
+}
+function mapReview(r: ProductReviewItem): ProductReview {
+  return {
+    id: String(r.id),
+    customer: r.customer_id != null ? `#${r.customer_id}` : "—",
+    rating: r.rate,
+    comment: r.comment,
+    isPurchased: r.is_purchased,
+    createdAt: r.created_at ? r.created_at.slice(0, 10) : "",
+    hidden: false,
+  };
+}
 
 export const Route = createFileRoute("/_panel/products/$id/reviews")({
   head: () => ({ meta: [{ title: "Product reviews — Mixlebs Admin" }] }),
@@ -31,7 +67,26 @@ function ProductReviewsPage() {
   const t = useT();
   const state = usePageState();
   const { id } = Route.useParams();
-  const product = PRODUCT_ROWS.find((p) => p.id === id) ?? PRODUCT_ROWS[0];
+
+  const productQuery = useQuery({
+    queryKey: ["product", id],
+    queryFn: () => getProduct({ data: { id: Number(id) } }),
+  });
+  const reviewsQuery = useQuery({
+    queryKey: ["product", id, "reviews"],
+    queryFn: () => listProductReviews({ data: { productId: Number(id) } }),
+    staleTime: 30 * 1000,
+  });
+  const product = {
+    id,
+    name: productQuery.data?.name ?? "",
+    sku: String(id),
+    store: productQuery.data?.store_id ?? "",
+  };
+  const PRODUCT_REVIEWS = useMemo<ProductReview[]>(
+    () => unpage<ProductReviewItem>(reviewsQuery.data).map(mapReview),
+    [reviewsQuery.data],
+  );
 
   const [rating, setRating] = useState("ANY");
   const [purchased, setPurchased] = useState("ANY");
@@ -47,7 +102,7 @@ function ProductReviewsPage() {
       if (to && r.createdAt > to) return false;
       return true;
     });
-  }, [rating, purchased, from, to]);
+  }, [PRODUCT_REVIEWS, rating, purchased, from, to]);
 
   const avg = (
     PRODUCT_REVIEWS.reduce((a, r) => a + r.rating, 0) / Math.max(PRODUCT_REVIEWS.length, 1)

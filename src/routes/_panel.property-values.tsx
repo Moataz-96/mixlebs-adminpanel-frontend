@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Sparkles, Pencil } from "lucide-react";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -34,7 +35,37 @@ import {
 import { useT } from "@/lib/i18n";
 import { usePageState } from "@/lib/page-state";
 import { useApp } from "@/lib/app-context";
-import { PROPERTY_VALUES, PROPERTIES_FULL, type PropertyValueRow } from "@/lib/mock/catalog";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
+import {
+  listProperties,
+  listPropertyValues,
+  createPropertyValue,
+  updatePropertyValue,
+  type Page,
+  type PropertyItem,
+  type PropertyValueItem,
+} from "@/lib/api/catalog.functions";
+
+// Row shapes the §7.8 table/editor consume (was mock/catalog). `property` is
+// the property KEY string, `store` is the store name (or null for platform).
+interface PropertyValueRow {
+  id: string;
+  property: string;
+  property_id: string;
+  store: string | null;
+  store_id: string | null;
+  value: string;
+  translations: { lang: string; value: string }[];
+}
+interface PropertyOption {
+  id: string;
+  key: string;
+}
+
+function unpage<T>(p: Page<T> | T[] | undefined): T[] {
+  if (!p) return [];
+  return Array.isArray(p) ? p : p.results;
+}
 
 export const Route = createFileRoute("/_panel/property-values")({
   head: () => ({ meta: [{ title: "Property values — Mixlebs Admin" }] }),
@@ -60,15 +91,57 @@ function PropertyValuesPage() {
   const isStore = role === "store";
   const canSeeStore = role === "admin" || role === "staff";
 
+  const { stores } = useApp();
   const [q, setQ] = useState("");
   const [editing, setEditing] = useState<PropertyValueRow | "new" | null>(null);
 
+  const propsQuery = useQuery({
+    queryKey: ["properties"],
+    queryFn: () => listProperties(),
+    staleTime: 60 * 1000,
+  });
+  const valuesQuery = useQuery({
+    queryKey: ["property-values"],
+    queryFn: () => listPropertyValues(),
+    staleTime: 30 * 1000,
+  });
+
+  const propertyOptions = useMemo<PropertyOption[]>(
+    () => unpage<PropertyItem>(propsQuery.data).map((p) => ({ id: String(p.id), key: p.key })),
+    [propsQuery.data],
+  );
+  const keyById = useMemo(() => {
+    const m = new Map<number, string>();
+    unpage<PropertyItem>(propsQuery.data).forEach((p) => m.set(p.id, p.key));
+    return m;
+  }, [propsQuery.data]);
+  const storeNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    stores.forEach((s) => m.set(s.id, s.name));
+    return m;
+  }, [stores]);
+
+  const allValues = useMemo<PropertyValueRow[]>(
+    () =>
+      unpage<PropertyValueItem>(valuesQuery.data).map((v) => ({
+        id: String(v.id),
+        property: keyById.get(v.property) ?? v.property_key ?? String(v.property),
+        property_id: String(v.property),
+        store: v.store ? (storeNameById.get(v.store) ?? v.store) : null,
+        store_id: v.store ?? null,
+        value: v.value,
+        translations: (v.translations ?? []).map((tr) => ({
+          lang: tr.language_code,
+          value: tr.value,
+        })),
+      })),
+    [valuesQuery.data, keyById, storeNameById],
+  );
+
   const filtered = useMemo(
     () =>
-      PROPERTY_VALUES.filter((v) =>
-        `${v.property} ${v.value}`.toLowerCase().includes(q.toLowerCase()),
-      ),
-    [q],
+      allValues.filter((v) => `${v.property} ${v.value}`.toLowerCase().includes(q.toLowerCase())),
+    [allValues, q],
   );
 
   const columns: Column<PropertyValueRow>[] = [
@@ -135,14 +208,14 @@ function PropertyValuesPage() {
       <div className="grid gap-4 md:grid-cols-3">
         <KpiCard
           label={t("catalog.propertyValues.kpiKeys")}
-          value={PROPERTIES_FULL.length}
+          value={propertyOptions.length}
           icon={<Sparkles className="h-5 w-5" />}
           accent
         />
-        <KpiCard label={t("catalog.propertyValues.kpiValues")} value={PROPERTY_VALUES.length} />
+        <KpiCard label={t("catalog.propertyValues.kpiValues")} value={allValues.length} />
         <KpiCard
           label={t("catalog.propertyValues.kpiStoreScoped")}
-          value={PROPERTY_VALUES.filter((v) => v.store).length}
+          value={allValues.filter((v) => v.store).length}
           delta={t("catalog.propertyValues.storeScopedDelta")}
         />
       </div>
@@ -193,6 +266,7 @@ function PropertyValuesPage() {
         open={editing !== null}
         value={editing === "new" ? null : editing}
         isStore={isStore}
+        propertyOptions={propertyOptions}
         onClose={() => setEditing(null)}
       />
     </div>
@@ -203,21 +277,24 @@ function ValueEditor({
   open,
   value,
   isStore,
+  propertyOptions,
   onClose,
 }: {
   open: boolean;
   value: PropertyValueRow | null;
   isStore: boolean;
+  propertyOptions: PropertyOption[];
   onClose: () => void;
 }) {
   const t = useT();
   const { stores, currentStoreId } = useApp();
+  const queryClient = useQueryClient();
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: {
-      store_id: isStore ? (currentStoreId ?? "") : value?.store ? "str_01" : "",
-      property_id: PROPERTIES_FULL.find((p) => p.key === value?.property)?.id ?? "",
+      store_id: isStore ? (currentStoreId ?? "") : (value?.store_id ?? ""),
+      property_id: value?.property_id ?? "",
       value: value?.value ?? "",
     },
   });
@@ -225,12 +302,39 @@ function ValueEditor({
     register,
     handleSubmit,
     control,
+    setError,
     formState: { errors, isSubmitting },
   } = form;
 
-  function submit(_v: Values) {
-    toast.success(t("catalog.propertyValues.saved"));
-    onClose();
+  const mutation = useMutation({
+    mutationFn: (v: Values) => {
+      const body: Record<string, unknown> = {
+        property: Number(v.property_id),
+        value: v.value,
+        store: v.store_id ? v.store_id : null,
+      };
+      return value
+        ? updatePropertyValue({ data: { id: Number(value.id), body } })
+        : createPropertyValue({ data: body });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["property-values"] });
+      toast.success(t("catalog.propertyValues.saved"));
+      onClose();
+    },
+    onError: (err) => {
+      const info = parseServerError(err);
+      (["property_id", "value", "store_id"] as const).forEach((f) => {
+        const beField = f === "property_id" ? "property" : f === "store_id" ? "store" : "value";
+        const msg = fieldMessage(info.fieldErrors, beField);
+        if (msg) setError(f, { message: msg });
+      });
+      toast.error(info.message);
+    },
+  });
+
+  function submit(v: Values) {
+    mutation.mutate(v);
   }
 
   return (
@@ -283,7 +387,7 @@ function ValueEditor({
                     <SelectValue placeholder="—" />
                   </SelectTrigger>
                   <SelectContent>
-                    {PROPERTIES_FULL.map((p) => (
+                    {propertyOptions.map((p) => (
                       <SelectItem key={p.id} value={p.id}>
                         {p.key}
                       </SelectItem>
@@ -329,7 +433,7 @@ function ValueEditor({
           <Button
             type="submit"
             form="value-form"
-            disabled={isSubmitting}
+            disabled={isSubmitting || mutation.isPending}
             className="bg-gradient-primary text-primary-foreground"
           >
             {t("common.save")}

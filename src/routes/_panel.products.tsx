@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
   Package,
@@ -54,8 +55,63 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { usePageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
-import { CATEGORIES, TAGS } from "@/lib/mock-data";
-import { PRODUCT_ROWS, PRODUCT_STATUSES, STORE_NAMES, type ProductRow } from "@/lib/mock/products";
+import { useApp } from "@/lib/app-context";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listProducts,
+  bulkUpdateProducts,
+  updateProduct,
+  deleteProduct,
+  listCategories,
+  type ProductListItem,
+  type CategoryItem,
+} from "@/lib/api/catalog.functions";
+
+// All ProductStatusChoices (mirrors the BE StatusA38Enum the filter sends).
+const PRODUCT_STATUSES = [
+  "TEMPORARY",
+  "PENDING",
+  "AVAILABLE",
+  "OUT_OF_STOCK",
+  "SOLD_OUT",
+  "DISCONTINTUED",
+  "HIDDEN",
+  "DECLINED",
+  "PENDING_RESTOCK",
+  "PREORDER",
+  "ARCHIVED",
+] as const;
+
+// Row shape the §7.1 table consumes (was mock/products ProductRow). Mapped from
+// the BE ProductList. `modelNumber`, `sold`, `tags`, `hasImage` are derived
+// from the available fields; the category/store names are resolved client-side
+// from the category list + the store picker.
+interface ProductRow {
+  id: string;
+  name: string;
+  sku: string;
+  store: string;
+  category: string;
+  price: number;
+  stock: number;
+  status: string;
+  variants: number;
+  updated: string;
+  modelNumber: string;
+  sold: number;
+  rating: number;
+  ratingCount: number;
+  created: string;
+  hasImage: boolean;
+  tags: string[];
+  priceMin?: number;
+  priceMax?: number;
+}
+
+function num(s: string | number | null | undefined): number {
+  const n = typeof s === "number" ? s : parseFloat(String(s ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
 
 export const Route = createFileRoute("/_panel/products")({
   head: () => ({ meta: [{ title: "Products — Mixlebs Admin" }] }),
@@ -68,6 +124,71 @@ function ProductsPage() {
   const { role, has } = usePermissions();
   const state = usePageState();
   const staffOrAdmin = role === "admin" || role === "staff";
+  const { currentStoreId, stores } = useApp();
+  const queryClient = useQueryClient();
+
+  // Category list (for the filter dropdown + resolving the row category name).
+  const categoriesQuery = useQuery({
+    queryKey: ["categories"],
+    queryFn: () => listCategories({ data: { page_size: 200 } }),
+    staleTime: 60 * 1000,
+  });
+  const categoryList = useMemo<CategoryItem[]>(
+    () => categoriesQuery.data?.results ?? [],
+    [categoriesQuery.data],
+  );
+  const categoryNameById = useMemo(() => {
+    const m = new Map<number, string>();
+    categoryList.forEach((c) => m.set(c.id, c.name));
+    return m;
+  }, [categoryList]);
+  const storeNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    stores.forEach((s) => m.set(s.id, s.name));
+    return m;
+  }, [stores]);
+
+  // Live products. STAFF/ADMIN scope to the topbar store picker (null = all);
+  // STORE users are auto-scoped on the BE.
+  const productsQuery = useQuery({
+    queryKey: ["products", currentStoreId],
+    queryFn: () =>
+      listProducts({ data: { store_id: currentStoreId, page_size: 200 } }),
+    staleTime: 30 * 1000,
+  });
+
+  const mapRow = (p: ProductListItem): ProductRow => {
+    const priceMin = num(p.price_min);
+    const priceMax = num(p.price_max);
+    return {
+      id: String(p.id),
+      name: p.name,
+      sku: String(p.id),
+      store: storeNameById.get(p.store_id) ?? p.store_id,
+      category: categoryNameById.get(p.category_id) ?? String(p.category_id),
+      price: num(p.list_price),
+      stock: num(p.stock),
+      status: p.status,
+      variants: num(p.variants_count),
+      updated: p.updated_at ? p.updated_at.slice(0, 10) : "",
+      modelNumber: "",
+      sold: p.sold_out ?? 0,
+      rating: num(p.rating_avg),
+      ratingCount: num(p.rating_count),
+      created: p.created_at ? p.created_at.slice(0, 10) : "",
+      hasImage: !!p.primary_image,
+      tags: [],
+      priceMin: priceMin || undefined,
+      priceMax: priceMax || undefined,
+    };
+  };
+  const PRODUCT_ROWS = useMemo<ProductRow[]>(
+    () => (productsQuery.data?.results ?? []).map(mapRow),
+    [productsQuery.data, categoryNameById, storeNameById],
+  );
+  const CATEGORIES = categoryList;
+  const STORE_NAMES = stores.map((s) => s.name);
+  const TAGS: string[] = [];
 
   // Filters (§7.1)
   const [q, setQ] = useState("");
@@ -142,6 +263,38 @@ function ProductsPage() {
     tab,
     staffOrAdmin,
   ]);
+
+  // Write mutations. Bulk routes through products/bulk_update; single
+  // publish/hide + delete route through the product detail endpoints. All
+  // invalidate the products list so the table reflects the BE truth.
+  const bulkMutation = useMutation({
+    mutationFn: (v: { ids: string[]; action: string; extra?: Record<string, unknown> }) =>
+      bulkUpdateProducts({
+        data: { ids: v.ids.map((x) => Number(x)), action: v.action, ...(v.extra ?? {}) },
+      }),
+    onSuccess: (_d, v) => {
+      void queryClient.invalidateQueries({ queryKey: ["products"] });
+      toast.success(t("products.toastBulkDone", { n: v.ids.length }));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const statusMutation = useMutation({
+    mutationFn: (v: { id: string; status: string }) =>
+      updateProduct({ data: { id: Number(v.id), body: { status: v.status } } }),
+    onSuccess: (_d, v) => {
+      void queryClient.invalidateQueries({ queryKey: ["products"] });
+      toast.success(v.status === "AVAILABLE" ? t("products.toastPublished") : t("products.toastHidden"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => deleteProduct({ data: { id: Number(id) } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["products"] });
+      toast.success(t("products.toastDeleted"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
 
   const total = PRODUCT_ROWS.length;
   const low = PRODUCT_ROWS.filter((p) => p.stock > 0 && p.stock < 30).length;
@@ -309,9 +462,10 @@ function ProductsPage() {
           <DropdownMenuSeparator />
           <DropdownMenuItem
             onClick={() =>
-              toast.success(
-                p.status === "AVAILABLE" ? t("products.toastHidden") : t("products.toastPublished"),
-              )
+              statusMutation.mutate({
+                id: p.id,
+                status: p.status === "AVAILABLE" ? "HIDDEN" : "AVAILABLE",
+              })
             }
           >
             {p.status === "AVAILABLE"
@@ -332,7 +486,7 @@ function ProductsPage() {
             title={t("products.deleteTitle")}
             description={t("products.deleteDesc")}
             confirmLabel={t("common.delete")}
-            onConfirm={() => toast.success(t("products.toastDeleted"))}
+            onConfirm={() => deleteMutation.mutate(p.id)}
           />
         </Can>
       </DropdownMenuContent>
@@ -343,39 +497,37 @@ function ProductsPage() {
     ? [
         {
           label: t("products.bulkActivate"),
-          onClick: (ids: string[]) => toast.success(t("products.toastBulkDone", { n: ids.length })),
+          onClick: (ids: string[]) => bulkMutation.mutate({ ids, action: "activate" }),
         },
         {
           label: t("products.bulkHide"),
-          onClick: (ids: string[]) => toast.success(t("products.toastBulkDone", { n: ids.length })),
+          onClick: (ids: string[]) => bulkMutation.mutate({ ids, action: "hide" }),
         },
         {
           label: t("products.bulkArchive"),
-          onClick: (ids: string[]) => toast.success(t("products.toastBulkDone", { n: ids.length })),
+          onClick: (ids: string[]) => bulkMutation.mutate({ ids, action: "archive" }),
         },
         {
           label: t("products.bulkChangeCategory"),
           onClick: (ids: string[]) =>
-            toast.success(t("products.toastCategoryChanged"), { description: `${ids.length}` }),
+            bulkMutation.mutate({ ids, action: "change_category" }),
         },
         {
           label: t("products.bulkAddTag"),
-          onClick: (ids: string[]) =>
-            toast.success(t("products.toastTagAdded"), { description: `${ids.length}` }),
+          onClick: (ids: string[]) => bulkMutation.mutate({ ids, action: "add_tag" }),
         },
         ...(role === "admin"
           ? [
               {
                 label: t("products.bulkMoveStore"),
-                onClick: (ids: string[]) =>
-                  toast.success(t("products.toastMovedStore"), { description: `${ids.length}` }),
+                onClick: (ids: string[]) => bulkMutation.mutate({ ids, action: "move_store" }),
               },
             ]
           : []),
         {
           label: t("products.bulkDelete"),
           destructive: true,
-          onClick: (ids: string[]) => toast.success(t("products.toastBulkDone", { n: ids.length })),
+          onClick: (ids: string[]) => bulkMutation.mutate({ ids, action: "delete" }),
         },
       ]
     : undefined;

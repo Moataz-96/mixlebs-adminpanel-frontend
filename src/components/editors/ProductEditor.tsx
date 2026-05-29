@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm, Controller, type Control, type UseFormRegister } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -52,17 +53,71 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { useT } from "@/lib/i18n";
-import type { Product } from "@/lib/mock-data";
-import { CATEGORIES, TAGS, PROPERTIES } from "@/lib/mock-data";
+import { useApp } from "@/lib/app-context";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
 import {
-  STORE_NAMES,
-  mockVariants,
-  mockImages,
-  mockProperties,
-  type VariantRow,
-  type ImageRow,
-  type PropertyRow,
-} from "@/lib/mock/products";
+  createProduct,
+  updateProduct,
+  listCategories,
+  listProperties,
+  listPropertyValues,
+  listVariants,
+  listProductImages,
+  listProductProperties,
+  type Page,
+  type ProductDetail,
+  type CategoryItem,
+  type PropertyItem,
+  type PropertyValueItem,
+  type Variant,
+  type ProductImageItem,
+  type ProductPropertyItem,
+} from "@/lib/api/catalog.functions";
+
+// FE product shape the editor consumes (was mock-data Product) — mapped from
+// the BE ProductDetail by the edit route.
+export interface Product {
+  id: string;
+  name: string;
+  sku: string;
+  store: string;
+  category: string;
+  price: number;
+  stock: number;
+  status: string;
+  variants: number;
+  updated: string;
+}
+
+// Editor-local sub-collection row shapes (were mock/products). Variants /
+// images / properties tabs edit these in local state and seed from live data
+// in edit mode.
+interface VariantRow {
+  id: string;
+  sku: string;
+  modelNumber: string;
+  attributes: string;
+  originalPrice: number;
+  price: number;
+  discount: number;
+  stock: number;
+}
+interface ImageRow {
+  id: string;
+  ml: boolean;
+  gt: boolean;
+  relaxation: boolean;
+}
+interface PropertyRow {
+  id: string;
+  property: string;
+  value: string;
+}
+
+function unpage<T>(p: Page<T> | T[] | undefined): T[] {
+  if (!p) return [];
+  return Array.isArray(p) ? p : p.results;
+}
 
 interface Props {
   mode: "create" | "edit";
@@ -142,11 +197,75 @@ export function ProductEditor({ mode, product }: Props) {
   const navigate = useNavigate();
   const { role } = usePermissions();
   const staffOrAdmin = role === "admin" || role === "staff";
+  const { stores, currentStoreId } = useApp();
+  const queryClient = useQueryClient();
+
+  // Live lookups feeding the editor's selects. Stores come from the picker;
+  // categories / properties / property-values from the catalog endpoints.
+  const STORE_NAMES = useMemo(() => stores.map((s) => s.id), [stores]);
+  const storeLabel = useMemo(() => {
+    const m = new Map<string, string>();
+    stores.forEach((s) => m.set(s.id, s.name));
+    return m;
+  }, [stores]);
+  const categoriesQuery = useQuery({
+    queryKey: ["categories"],
+    queryFn: () => listCategories({ data: { page_size: 200 } }),
+    staleTime: 60 * 1000,
+  });
+  const CATEGORIES = useMemo<CategoryItem[]>(
+    () => categoriesQuery.data?.results ?? [],
+    [categoriesQuery.data],
+  );
+  const propertiesQuery = useQuery({
+    queryKey: ["properties"],
+    queryFn: () => listProperties(),
+    staleTime: 60 * 1000,
+  });
+  const propertyValuesQuery = useQuery({
+    queryKey: ["property-values"],
+    queryFn: () => listPropertyValues(),
+    staleTime: 60 * 1000,
+  });
+  // PROPERTIES: { id, key, values[] } — values resolved from property-values.
+  const PROPERTIES = useMemo(() => {
+    const valuesByProperty = new Map<number, string[]>();
+    unpage<PropertyValueItem>(propertyValuesQuery.data).forEach((v) => {
+      const list = valuesByProperty.get(v.property) ?? [];
+      list.push(v.value);
+      valuesByProperty.set(v.property, list);
+    });
+    return unpage<PropertyItem>(propertiesQuery.data).map((p) => ({
+      id: String(p.id),
+      key: p.key,
+      values: valuesByProperty.get(p.id) ?? [],
+    }));
+  }, [propertiesQuery.data, propertyValuesQuery.data]);
+  // TAGS suggestions come from the edited product's existing tags (no global
+  // tag-suggestion endpoint); empty for a new product.
+  const TAGS = useMemo<string[]>(() => [], []);
+
+  // Edit-mode sub-collections, seeded from the live nested endpoints.
+  const variantsQuery = useQuery({
+    queryKey: ["product", product?.id, "variants"],
+    queryFn: () => listVariants({ data: { productId: Number(product?.id) } }),
+    enabled: mode === "edit" && !!product?.id,
+  });
+  const imagesQuery = useQuery({
+    queryKey: ["product", product?.id, "images"],
+    queryFn: () => listProductImages({ data: { productId: Number(product?.id) } }),
+    enabled: mode === "edit" && !!product?.id,
+  });
+  const productPropsQuery = useQuery({
+    queryKey: ["product", product?.id, "properties"],
+    queryFn: () => listProductProperties({ data: { productId: Number(product?.id) } }),
+    enabled: mode === "edit" && !!product?.id,
+  });
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: {
-      store_id: product?.store ?? STORE_NAMES[0],
+      store_id: product?.store ?? currentStoreId ?? "",
       category_id: product?.category ?? "",
       status: product?.status ?? "TEMPORARY",
       list_price: product?.price ?? 0,
@@ -177,23 +296,74 @@ export function ProductEditor({ mode, product }: Props) {
     control,
     watch,
     setValue,
+    setError,
     formState: { errors, isSubmitting },
   } = form;
 
   const currentStatus = watch("status");
   const legalStatuses = LEGAL_TRANSITIONS[currentStatus] ?? STATUSES.slice();
 
-  // Sub-collections (local editor state)
-  const [variants, setVariants] = useState<VariantRow[]>(
-    mode === "edit" ? mockVariants(product?.sku ?? "SAF") : [],
-  );
-  const [images, setImages] = useState<ImageRow[]>(mode === "edit" ? mockImages() : []);
+  // Sub-collections (local editor state, seeded from live nested data once it
+  // resolves in edit mode).
+  const [variants, setVariants] = useState<VariantRow[]>([]);
+  const [images, setImages] = useState<ImageRow[]>([]);
   const [primaryImage, setPrimaryImage] = useState(0);
-  const [properties, setProperties] = useState<PropertyRow[]>(
-    mode === "edit" ? mockProperties() : [],
-  );
-  const [chips, setChips] = useState<string[]>(product ? ["organic", "halal"] : []);
+  const [properties, setProperties] = useState<PropertyRow[]>([]);
+  const [chips, setChips] = useState<string[]>([]);
   const [chipInput, setChipInput] = useState("");
+
+  const propLabelById = useMemo(() => {
+    const m = new Map<number, string>();
+    unpage<PropertyItem>(propertiesQuery.data).forEach((p) => m.set(p.id, p.key));
+    return m;
+  }, [propertiesQuery.data]);
+
+  useEffect(() => {
+    const live = unpage<Variant>(variantsQuery.data);
+    if (live.length) {
+      setVariants(
+        live.map((v) => ({
+          id: String(v.id),
+          sku: v.sku ?? String(v.id),
+          modelNumber: v.model_number ?? "",
+          attributes: (v.attributes ?? [])
+            .map((a) => `${a.property_key}: ${a.value_label}`)
+            .join(", "),
+          originalPrice: Number(v.original_price ?? 0),
+          price: Number(v.price ?? 0),
+          discount: Number(v.discount ?? 0),
+          stock: v.stock ?? 0,
+        })),
+      );
+    }
+  }, [variantsQuery.data]);
+
+  useEffect(() => {
+    const live = unpage<ProductImageItem>(imagesQuery.data);
+    if (live.length) {
+      setImages(
+        live.map((im) => ({
+          id: String(im.id),
+          ml: im.ml_creature_detection != null && im.ml_creature_detection !== "NONE",
+          gt: im.gt_creature_detection != null && im.gt_creature_detection !== "NONE",
+          relaxation: !!im.relaxation,
+        })),
+      );
+    }
+  }, [imagesQuery.data]);
+
+  useEffect(() => {
+    const live = unpage<ProductPropertyItem>(productPropsQuery.data);
+    if (live.length) {
+      setProperties(
+        live.map((pp) => ({
+          id: String(pp.id),
+          property: pp.property_key ?? propLabelById.get(pp.property) ?? String(pp.property),
+          value: pp.value_label ?? String(pp.value),
+        })),
+      );
+    }
+  }, [productPropsQuery.data, propLabelById]);
 
   const priceMin = variants.length
     ? Math.min(...variants.map((v) => v.price))
@@ -203,11 +373,67 @@ export function ProductEditor({ mode, product }: Props) {
     : watch("list_price");
   const totalStock = variants.reduce((a, v) => a + v.stock, 0);
 
+  // Resolve the category select value (a category NAME, per the existing JSX)
+  // back to its numeric id for the BE write.
+  function resolveCategoryId(catValue: string): number | undefined {
+    if (!catValue) return undefined;
+    const byName = CATEGORIES.find((c) => c.name === catValue);
+    if (byName) return byName.id;
+    const n = Number(catValue);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  }
+
+  function buildBody(v: Values, statusOverride?: string): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+      store: v.store_id,
+      category: resolveCategoryId(v.category_id),
+      status: statusOverride ?? v.status,
+      list_price: String(v.list_price),
+      translations: [
+        { language_code: "en", name: v.name_en, description: v.description_en ?? "" },
+        { language_code: "ar", name: v.name_ar, description: v.description_ar ?? "" },
+      ],
+    };
+    return body;
+  }
+
+  const saveMutation = useMutation({
+    mutationFn: (args: { values: Values; statusOverride?: string }) => {
+      const body = buildBody(args.values, args.statusOverride);
+      return mode === "edit" && product?.id
+        ? updateProduct({ data: { id: Number(product.id), body } })
+        : createProduct({ data: body });
+    },
+    onSuccess: (_d, args) => {
+      void queryClient.invalidateQueries({ queryKey: ["products"] });
+      toast.success(args.statusOverride ? t("products.draftSavedToast") : t("products.savedToast"));
+      if (!args.statusOverride) navigate({ to: "/products" });
+    },
+    onError: (err) => {
+      const info = parseServerError(err);
+      (["store_id", "category_id", "status", "list_price", "name_en", "name_ar"] as const).forEach(
+        (f) => {
+          const beField =
+            f === "store_id"
+              ? "store"
+              : f === "category_id"
+                ? "category"
+                : f === "list_price"
+                  ? "list_price"
+                  : f;
+          const msg = fieldMessage(info.fieldErrors, beField);
+          if (msg) setError(f, { message: msg });
+        },
+      );
+      toast.error(info.message);
+    },
+  });
+
   function submit(asDraft: boolean, duplicate = false) {
-    return handleSubmit(() => {
+    return handleSubmit((values) => {
       if (asDraft) {
         setValue("status", "TEMPORARY");
-        toast.success(t("products.draftSavedToast"));
+        saveMutation.mutate({ values, statusOverride: "TEMPORARY" });
         return;
       }
       if (duplicate) {
@@ -215,8 +441,7 @@ export function ProductEditor({ mode, product }: Props) {
         navigate({ to: "/products/new" });
         return;
       }
-      toast.success(t("products.savedToast"));
-      navigate({ to: "/products" });
+      saveMutation.mutate({ values });
     });
   }
 
@@ -292,7 +517,7 @@ export function ProductEditor({ mode, product }: Props) {
                       <SelectContent>
                         {STORE_NAMES.map((s) => (
                           <SelectItem key={s} value={s}>
-                            {s}
+                            {storeLabel.get(s) ?? s}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -676,6 +901,7 @@ export function ProductEditor({ mode, product }: Props) {
               )}
               <PropertyDialog
                 t={t}
+                propertyOptions={PROPERTIES}
                 onSave={(p) => {
                   setProperties((prev) => [...prev, p]);
                   toast.success(t("products.propertyAdded"));
@@ -1085,17 +1311,19 @@ function VariantDialog({
 
 function PropertyDialog({
   t,
+  propertyOptions,
   onSave,
   trigger,
 }: {
   t: ReturnType<typeof useT>;
+  propertyOptions: { id: string; key: string; values: string[] }[];
   onSave: (p: PropertyRow) => void;
   trigger: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const [property, setProperty] = useState("");
   const [value, setValue] = useState("");
-  const selected = PROPERTIES.find((p) => p.key === property);
+  const selected = propertyOptions.find((p) => p.key === property);
 
   function save() {
     if (!property || !value) return;
@@ -1125,7 +1353,7 @@ function PropertyDialog({
                 <SelectValue placeholder={t("products.chooseProperty")} />
               </SelectTrigger>
               <SelectContent>
-                {PROPERTIES.map((p) => (
+                {propertyOptions.map((p) => (
                   <SelectItem key={p.id} value={p.key}>
                     {p.key}
                   </SelectItem>
