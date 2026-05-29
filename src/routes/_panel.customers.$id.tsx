@@ -27,7 +27,13 @@ import {
 import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
 import { parseServerError } from "@/lib/api/error";
-import { getCustomer, blockReturns, type AdminCustomer } from "@/lib/api/customers.functions";
+import {
+  getCustomer,
+  blockReturns,
+  listCustomerOrders,
+  getCustomerAuditLog,
+  type AdminCustomer,
+} from "@/lib/api/customers.functions";
 
 export const Route = createFileRoute("/_panel/customers/$id")({
   head: () => ({ meta: [{ title: "Customer — Mixlebs Admin" }] }),
@@ -124,10 +130,39 @@ function CustomerDetail() {
     onError: (err) => toast.error(parseServerError(err).message),
   });
 
-  // Per-customer orders / devices / audit have no P7 endpoints (ENTRY 029).
-  const ORDERS: { id: string; number: string; store: string; total: number; status: string; placed: string }[] = [];
+  // ENTRY 029d: per-customer orders (gated customers.view + orders.view on BE).
+  const ordersQuery = useQuery({
+    queryKey: ["admin-customer-orders", id],
+    queryFn: () => listCustomerOrders({ data: { id } }),
+    enabled: canView && perms.has("orders.view"),
+    staleTime: 30 * 1000,
+  });
+  const ORDERS = (ordersQuery.data?.results ?? []).map((o) => ({
+    id: String(o.id),
+    number: o.order_number,
+    store: o.store_name ?? "—",
+    total: Number(o.total) || 0,
+    status: o.order_status,
+    placed: (o.created_at ?? "").slice(0, 10),
+  }));
+
+  // ENTRY 029e: per-customer audit trail — documented empty placeholder (no
+  // DB-backed audit model; blocked on ENTRY 012). Devices have no per-customer
+  // BE endpoint, so that tab stays empty.
+  const auditQuery = useQuery({
+    queryKey: ["admin-customer-audit", id],
+    queryFn: () => getCustomerAuditLog({ data: { id } }),
+    enabled: canView,
+    staleTime: 30 * 1000,
+  });
   const DEVICE_TOKENS: { id: number; device_type: string | null; token: string; is_valid: boolean; created_at: string }[] = [];
-  const AUDIT_ENTRIES: { id: string; timestamp: string; method: string; url: string; status: number }[] = [];
+  const AUDIT_ENTRIES = (auditQuery.data?.results ?? []) as {
+    id: string;
+    timestamp: string;
+    method: string;
+    url: string;
+    status: number;
+  }[];
 
   const initials = c.name
     .split(" ")

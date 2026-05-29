@@ -9,6 +9,7 @@ import { z } from "zod";
 
 import { apiGet, apiPost } from "./_client";
 import { toClientError } from "./error";
+import type { OrderListItem } from "./orders.functions";
 import type { Page } from "./stores.admin.functions";
 
 export type CustomerGender = "MALE" | "FEMALE" | "OTHER" | null;
@@ -85,6 +86,46 @@ export const blockReturns = createServerFn({ method: "POST" })
       return await apiPost<AdminCustomer>(`/api/admin/v1/customers/${data.id}/block_returns/`, {
         is_return_blocked: data.is_return_blocked,
       });
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+// ENTRY 029d: orders placed by a customer (reuses the orders list shape).
+export const listCustomerOrders = createServerFn({ method: "GET" })
+  .inputValidator((d: { id: string; ordering?: string; page?: number; page_size?: number }) => d)
+  .handler(async ({ data }) => {
+    const sp = new URLSearchParams();
+    if (data.ordering) sp.set("ordering", data.ordering);
+    if (data.page) sp.set("page", String(data.page));
+    if (data.page_size) sp.set("page_size", String(data.page_size));
+    const q = sp.toString();
+    try {
+      return await apiGet<Page<OrderListItem>>(
+        `/api/admin/v1/customers/${data.id}/orders/${q ? `?${q}` : ""}`,
+      );
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+// ENTRY 029e: per-customer audit trail. Documented empty placeholder (no
+// DB-backed audit model — blocked on ENTRY 012 core change).
+export interface CustomerAuditLogPage {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: unknown[];
+  detail?: string;
+}
+
+export const getCustomerAuditLog = createServerFn({ method: "GET" })
+  .inputValidator((d: { id: string }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiGet<CustomerAuditLogPage>(
+        `/api/admin/v1/customers/${data.id}/audit-log/`,
+      );
     } catch (err) {
       throw toClientError(err);
     }

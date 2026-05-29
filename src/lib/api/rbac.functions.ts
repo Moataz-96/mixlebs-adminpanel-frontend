@@ -314,6 +314,24 @@ export const deletePermissionResource = createServerFn({ method: "POST" })
   );
 
 // ---------------------------------------------------------------------------
+// Permission-resource catalogue reseed (ENTRY 005) — POST
+// /api/admin/v1/permission-resources/reseed/. Superuser-only; idempotent.
+// Returns the catalogue/created/existing/present counts.
+// ---------------------------------------------------------------------------
+
+export interface ReseedResult {
+  catalogue: number;
+  created: number;
+  existing: number;
+  present: number;
+}
+
+export const reseedPermissionResources = createServerFn({ method: "POST" })
+  .handler(() =>
+    run(() => apiPost<ReseedResult>("/api/admin/v1/permission-resources/reseed/", {})),
+  );
+
+// ---------------------------------------------------------------------------
 // User-role attach / detach — POST /api/admin/v1/user-roles/ with
 // { user_id, role_id, action: "attach" | "detach" }.
 // ---------------------------------------------------------------------------

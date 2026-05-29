@@ -178,3 +178,104 @@ export const listUserDevices = createServerFn({ method: "GET" })
       throw toClientError(err);
     }
   });
+
+// --- ENTRY 029 per-user endpoints --------------------------------------------
+
+// ENTRY 029a: the user's resolved effective permission set.
+export interface EffectivePermissions {
+  permissions: string[];
+}
+
+export const getUserEffectivePermissions = createServerFn({ method: "GET" })
+  .inputValidator((d: { id: string }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiGet<EffectivePermissions>(
+        `/api/admin/v1/users/${data.id}/effective-permissions/`,
+      );
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+// ENTRY 029b: the UserPolicy rows attached to a user (read summary).
+export interface AttachedUserPolicy {
+  id: number;
+  name: string;
+  description: string;
+  type: string;
+  is_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export const listUserPoliciesForUser = createServerFn({ method: "GET" })
+  .inputValidator((d: { id: string }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiGet<Page<AttachedUserPolicy>>(
+        `/api/admin/v1/users/${data.id}/policies/`,
+      );
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+export const attachUserPolicyToUser = createServerFn({ method: "POST" })
+  .inputValidator((d: { id: string; user_policy_id: number }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiPost<AttachedUserPolicy>(
+        `/api/admin/v1/users/${data.id}/policies/`,
+        { user_policy_id: data.user_policy_id },
+      );
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+export const detachUserPolicyFromUser = createServerFn({ method: "POST" })
+  .inputValidator((d: { id: string; user_policy_id: number }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiDelete<AttachedUserPolicy | null>(
+        `/api/admin/v1/users/${data.id}/policies/`,
+        { user_policy_id: data.user_policy_id },
+      );
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+// ENTRY 029c: revoke a user's device token (BE flips is_valid=False).
+export const revokeUserDevice = createServerFn({ method: "POST" })
+  .inputValidator((d: { id: string; device_id: number }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiPost<AdminDeviceToken>(
+        `/api/admin/v1/users/${data.id}/devices/${data.device_id}/revoke/`,
+      );
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+// ENTRY 029e: per-user audit trail. Documented empty placeholder (no DB-backed
+// audit model exists — blocked on ENTRY 012 core change).
+export interface AuditLogPage {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: unknown[];
+  detail?: string;
+}
+
+export const getUserAuditLog = createServerFn({ method: "GET" })
+  .inputValidator((d: { id: string }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiGet<AuditLogPage>(`/api/admin/v1/users/${data.id}/audit-log/`);
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });

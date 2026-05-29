@@ -42,10 +42,22 @@ import {
   assignRole,
   removeRole,
   listUserDevices,
+  getUserEffectivePermissions,
+  listUserPoliciesForUser,
+  attachUserPolicyToUser,
+  detachUserPolicyFromUser,
+  revokeUserDevice,
+  getUserAuditLog,
   type AdminUser,
   type AdminDeviceToken,
+  type AttachedUserPolicy,
 } from "@/lib/api/users.functions";
-import { listRoles, type Role } from "@/lib/api/rbac.functions";
+import {
+  listRoles,
+  listUserPolicies,
+  type Role,
+  type UserPolicy as ApiUserPolicy,
+} from "@/lib/api/rbac.functions";
 
 // Frozen-UI local row shape (was mock UserRow). Mapped from BE AdminUser.
 interface UserRow {
@@ -221,7 +233,7 @@ function UserDetail() {
                 <DevicesTab userId={id} />
               </TabsContent>
               <TabsContent value="audit" className="mt-6">
-                <AuditTab />
+                <AuditTab userId={id} />
               </TabsContent>
             </Tabs>
           </>
@@ -402,11 +414,64 @@ function RbacTab({ u }: { u: UserRow }) {
     onError: (err) => toast.error(parseServerError(err).message),
   });
 
-  // Per-user UserPolicy attach/detach and the flattened effective-permission
-  // list have no dedicated endpoint in the P7 administration BE (ENTRY 029);
-  // those two cards render empty until that surface lands.
-  const USER_POLICIES: { id: string; name: string; type: "positive" | "negative"; description: string }[] = [];
-  const PERMISSIONS: string[] = [];
+  // ENTRY 029a/b: per-user effective permissions + the UserPolicy rows attached
+  // to this user are now served by the administration BE.
+  const effectiveQuery = useQuery({
+    queryKey: ["admin-user-effective-perms", u.id],
+    queryFn: () => getUserEffectivePermissions({ data: { id: u.id } }),
+    staleTime: 30 * 1000,
+  });
+  const policiesQuery = useQuery({
+    queryKey: ["admin-user-policies", u.id],
+    queryFn: () => listUserPoliciesForUser({ data: { id: u.id } }),
+    staleTime: 30 * 1000,
+  });
+  const allPoliciesQuery = useQuery({
+    queryKey: ["rbac-user-policies", "picker"],
+    queryFn: () => listUserPolicies({ data: { page_size: 200 } }),
+    staleTime: 60 * 1000,
+  });
+
+  const invalidatePolicies = () => {
+    void queryClient.invalidateQueries({ queryKey: ["admin-user-policies", u.id] });
+    void queryClient.invalidateQueries({ queryKey: ["admin-user-effective-perms", u.id] });
+  };
+
+  const attachPolicyMutation = useMutation({
+    mutationFn: (policyId: number) =>
+      attachUserPolicyToUser({ data: { id: u.id, user_policy_id: policyId } }),
+    onSuccess: () => {
+      invalidatePolicies();
+      toast.success(t("people.users.tPolicyAdded"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const detachPolicyMutation = useMutation({
+    mutationFn: (policyId: number) =>
+      detachUserPolicyFromUser({ data: { id: u.id, user_policy_id: policyId } }),
+    onSuccess: () => {
+      invalidatePolicies();
+      toast.success(t("people.users.tPolicyRemoved"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  // BE UserPolicy.type is an integer enum (POSITIVE=1, NEGATIVE=0); the per-user
+  // summary returns it as a string. Normalise both to the UI's positive/negative.
+  const policyKind = (type: AttachedUserPolicy["type"]): "positive" | "negative" =>
+    String(type).toUpperCase() === "NEGATIVE" || String(type) === "0" ? "negative" : "positive";
+
+  const USER_POLICIES = (policiesQuery.data?.results ?? []).map((p) => ({
+    id: p.id,
+    name: p.name,
+    type: policyKind(p.type),
+    description: p.description ?? "",
+  }));
+  const attachedIds = new Set(USER_POLICIES.map((p) => p.id));
+  const policyOptions: ApiUserPolicy[] = (allPoliciesQuery.data?.results ?? []).filter(
+    (p) => !attachedIds.has(p.id),
+  );
+  const PERMISSIONS: string[] = effectiveQuery.data?.permissions ?? [];
 
   return (
     <div className="space-y-4">
@@ -474,7 +539,7 @@ function RbacTab({ u }: { u: UserRow }) {
                     size="sm"
                     variant="ghost"
                     className="text-destructive"
-                    onClick={() => toast.success(t("people.users.tPolicyRemoved"))}
+                    onClick={() => detachPolicyMutation.mutate(p.id)}
                   >
                     {t("common.remove")}
                   </Button>
@@ -483,9 +548,19 @@ function RbacTab({ u }: { u: UserRow }) {
             ))}
           </TableBody>
         </Table>
-        <Button size="sm" variant="outline" className="mt-4">
-          <Plus className="me-1 h-3.5 w-3.5" /> {t("people.users.rbacAddPolicy")}
-        </Button>
+        <Select onValueChange={(v) => attachPolicyMutation.mutate(Number(v))}>
+          <SelectTrigger className="mt-4 h-8 w-auto gap-1.5">
+            <Plus className="h-3.5 w-3.5" />
+            <SelectValue placeholder={t("people.users.rbacAddPolicy")} />
+          </SelectTrigger>
+          <SelectContent>
+            {policyOptions.map((p) => (
+              <SelectItem key={p.id} value={String(p.id)}>
+                {p.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </Card>
 
       <Card className="border-0 bg-card p-6 shadow-soft">
@@ -506,12 +581,24 @@ function RbacTab({ u }: { u: UserRow }) {
 
 function DevicesTab({ userId }: { userId: string }) {
   const t = useT();
+  const queryClient = useQueryClient();
   const devicesQuery = useQuery({
     queryKey: ["admin-user-devices", userId],
     queryFn: () => listUserDevices({ data: { id: userId } }),
     staleTime: 30 * 1000,
   });
   const devices: AdminDeviceToken[] = devicesQuery.data?.results ?? [];
+
+  // ENTRY 029c: revoke a user's device token (BE flips is_valid=False).
+  const revokeMutation = useMutation({
+    mutationFn: (deviceId: number) =>
+      revokeUserDevice({ data: { id: userId, device_id: deviceId } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["admin-user-devices", userId] });
+      toast.success(t("people.users.tRevoked"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
 
   return (
     <Card className="overflow-hidden border-0 shadow-soft">
@@ -555,15 +642,17 @@ function DevicesTab({ userId }: { userId: string }) {
                   {t(d.is_valid ? "people.users.devValidBadge" : "people.users.devInvalidBadge")}
                 </Badge>
               </TableCell>
-              <TableCell className="text-sm text-muted-foreground">—</TableCell>
+              <TableCell className="text-sm text-muted-foreground">
+                {d.created_at ?? "—"}
+              </TableCell>
               <TableCell>
-                {/* Revoking another user's device has no BE endpoint (only the
-                    self-service /account/devices/{id}/ exists) — ENTRY 029. */}
+                {/* ENTRY 029c: admin device revoke flips is_valid=False on the BE. */}
                 <Button
                   size="sm"
                   variant="ghost"
                   className="text-destructive"
-                  onClick={() => toast.success(t("people.users.tRevoked"))}
+                  disabled={!d.is_valid || revokeMutation.isPending}
+                  onClick={() => revokeMutation.mutate(d.id)}
                 >
                   {t("people.users.devRevoke")}
                 </Button>
@@ -576,20 +665,28 @@ function DevicesTab({ userId }: { userId: string }) {
   );
 }
 
-function AuditTab() {
+interface AuditEntry {
+  id: string;
+  timestamp: string;
+  method: string;
+  url: string;
+  status: number;
+  request_id: string;
+  ip: string;
+}
+
+function AuditTab({ userId }: { userId: string }) {
   const t = useT();
-  // The per-user audit trail is served by the Phase 8 /admin/audit-log surface;
-  // there is no per-user audit endpoint in the P7 administration BE (ENTRY 029),
-  // so this tab renders an empty trail until P8 wires the shared audit query.
-  const AUDIT_ENTRIES: {
-    id: string;
-    timestamp: string;
-    method: string;
-    url: string;
-    status: number;
-    request_id: string;
-    ip: string;
-  }[] = [];
+  // ENTRY 029e: the per-user audit endpoint exists but returns the documented
+  // empty placeholder — no DB-backed audit-log model is persisted yet (blocked
+  // on ENTRY 012, a mixlebs_core change). The query keeps the FE wired so the
+  // trail populates automatically once core persists audit rows.
+  const auditQuery = useQuery({
+    queryKey: ["admin-user-audit", userId],
+    queryFn: () => getUserAuditLog({ data: { id: userId } }),
+    staleTime: 30 * 1000,
+  });
+  const AUDIT_ENTRIES = (auditQuery.data?.results ?? []) as AuditEntry[];
   return (
     <Card className="overflow-hidden border-0 shadow-soft">
       <Table>

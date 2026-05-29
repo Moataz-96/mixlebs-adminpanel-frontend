@@ -46,6 +46,7 @@ import {
   createPermissionResource,
   updatePermissionResource,
   deletePermissionResource,
+  reseedPermissionResources,
   type PermissionResource as ApiPermissionResource,
   type ResourceMethod,
 } from "@/lib/api/rbac.functions";
@@ -139,6 +140,16 @@ function PermissionResourcesPage() {
     mutationFn: (id: number) => deletePermissionResource({ data: { id } }),
     onSuccess: () => {
       toast.success(t("admin.common.deletedToast"));
+      invalidate();
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  const reseedMut = useMutation({
+    mutationFn: () => reseedPermissionResources(),
+    onSuccess: (res) => {
+      // ENTRY 005: surface the created/existing counts from the BE.
+      toast.success(`${t("admin.permissionResources.reseeded")} (+${res.created})`);
       invalidate();
     },
     onError: (err) => toast.error(parseServerError(err).message),
@@ -265,7 +276,7 @@ function PermissionResourcesPage() {
               title={t("admin.permissionResources.reseedTitle")}
               description={t("admin.permissionResources.reseedDesc")}
               confirmLabel={t("admin.permissionResources.reseed")}
-              onConfirm={() => toast.success(t("admin.permissionResources.reseeded"))}
+              onConfirm={() => reseedMut.mutate()}
               trigger={
                 <Button variant="outline">
                   <RefreshCw className="me-1.5 h-4 w-4" /> {t("admin.permissionResources.reseed")}
