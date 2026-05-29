@@ -80,15 +80,14 @@ function InvoicesPage() {
   const [dateTo, setDateTo] = useState("");
 
   // Map the BE InvoiceList page into the frozen-UI InvoiceRow shape (§8.5).
-  // NOTE: the list serializer does not expose the recipient/customer name (it
-  // lives on InvoiceUser, returned only by the detail). Until the BE adds it
-  // (see required_adminpanel_change.md), the customer column shows "—".
+  // The list serializer now JOINs the invoice's primary InvoiceUser, so the
+  // customer column reads the recipient name (ENTRY 022).
   const rows: InvoiceRow[] = useMemo(
     () =>
       (invoicesQuery.data?.results ?? []).map((i: InvoiceListItem): InvoiceRow => ({
         id: String(i.id),
         order: i.related_order_id ?? i.related_return_id ?? "",
-        customer: "—",
+        customer: i.customer ?? i.recipient_name ?? "—",
         amount: num(i.total),
         issued: i.invoice_date ? i.invoice_date.slice(0, 10) : i.created_at ? i.created_at.slice(0, 10) : "",
         status: i.status ?? "",

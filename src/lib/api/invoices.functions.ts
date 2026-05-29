@@ -38,6 +38,10 @@ export interface InvoiceListItem {
   fees: string | null;
   total: string | number | null;
   status: string | null;
+  // Primary recipient (JOINed from the invoice's first InvoiceUser) — ENTRY 022.
+  customer: string | null;
+  recipient_name: string | null;
+  recipient_phone: string | null;
   related_order_id: string | null;
   related_return_id: string | null;
   created_at: string | null;
