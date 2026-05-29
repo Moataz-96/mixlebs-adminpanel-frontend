@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Save } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -7,6 +8,11 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useT } from "@/lib/i18n";
+import { parseServerError } from "@/lib/api/error";
+import {
+  getNotificationPrefs,
+  updateNotificationPrefs,
+} from "@/lib/api/account.functions";
 import { NOTIF_PREF_ROWS, type NotifChannel, type NotifPrefRow } from "@/lib/mock/account";
 
 export const Route = createFileRoute("/_panel/account/notifications-prefs")({
@@ -22,14 +28,46 @@ const CHANNELS: { key: NotifChannel; labelKey: string }[] = [
 
 function NotificationPrefsPage() {
   const t = useT();
+  const queryClient = useQueryClient();
   const [rows, setRows] = useState<NotifPrefRow[]>(() => NOTIF_PREF_ROWS.map((r) => ({ ...r })));
+
+  // The BE exposes only the master notification toggle (Preferences.notification);
+  // the per-category × per-channel matrix is a Phase 8 surface (ENTRY 030). We
+  // seed every matrix cell from the master flag and persist the master flag back
+  // (true if any cell is on).
+  const prefQuery = useQuery({
+    queryKey: ["account-notification-prefs"],
+    queryFn: () => getNotificationPrefs(),
+    staleTime: 30 * 1000,
+  });
+
+  useEffect(() => {
+    const master = prefQuery.data?.notification;
+    if (master !== undefined) {
+      setRows(
+        NOTIF_PREF_ROWS.map((r) => ({
+          ...r,
+          NOTIFICATION: master,
+          EMAIL: master,
+          SMS: master,
+        })),
+      );
+    }
+  }, [prefQuery.data]);
 
   function toggle(type: string, channel: NotifChannel, value: boolean) {
     setRows((prev) => prev.map((r) => (r.type === type ? { ...r, [channel]: value } : r)));
   }
 
-  function onSave() {
-    toast.success(t("account.npSaved"));
+  async function onSave() {
+    const anyOn = rows.some((r) => r.NOTIFICATION || r.EMAIL || r.SMS);
+    try {
+      await updateNotificationPrefs({ data: { notification: anyOn } });
+      await queryClient.invalidateQueries({ queryKey: ["account-notification-prefs"] });
+      toast.success(t("account.npSaved"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   return (

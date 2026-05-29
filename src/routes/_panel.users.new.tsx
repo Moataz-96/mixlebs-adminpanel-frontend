@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useMemo } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -16,7 +17,9 @@ import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { usePageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
-import { ROLE_OPTIONS } from "@/lib/mock/people";
+import { parseServerError } from "@/lib/api/error";
+import { createStaff } from "@/lib/api/users.functions";
+import { listRoles, type Role } from "@/lib/api/rbac.functions";
 
 export const Route = createFileRoute("/_panel/users/new")({
   head: () => ({ meta: [{ title: "New staff user — Mixlebs Admin" }] }),
@@ -50,13 +53,30 @@ function NewUser() {
   const navigate = useNavigate();
   const perms = usePermissions();
   const state = usePageState();
+  const queryClient = useQueryClient();
   const canCreate = perms.has("users.create_staff");
+
+  // Real role catalogue (P2 /admin/roles). The checkbox list is keyed by role
+  // name (frozen UI) and mapped to role_ids on submit.
+  const rolesQuery = useQuery({
+    queryKey: ["rbac-roles", "picker"],
+    queryFn: () => listRoles({ data: { page_size: 200 } }),
+    staleTime: 60 * 1000,
+  });
+  const roleList: Role[] = rolesQuery.data?.results ?? [];
+  const ROLE_OPTIONS = useMemo(() => roleList.map((r) => r.name), [roleList]);
+  const roleIdByName = useMemo(() => {
+    const m = new Map<string, number>();
+    roleList.forEach((r) => m.set(r.name, r.id));
+    return m;
+  }, [roleList]);
 
   const {
     register,
     handleSubmit,
     watch,
     setValue,
+    setError,
     formState: { errors, isSubmitting },
   } = useForm<Values>({
     resolver: zodResolver(schema),
@@ -77,9 +97,36 @@ function NewUser() {
   function toggleRole(r: string) {
     setValue("roles", roles.includes(r) ? roles.filter((x) => x !== r) : [...roles, r]);
   }
-  function onSubmit() {
-    toast.success(t("people.newUser.tCreated"));
-    navigate({ to: "/users" });
+  async function onSubmit(values: Values) {
+    try {
+      await createStaff({
+        data: {
+          email: values.email,
+          phone: values.phone || undefined,
+          password: values.password,
+          first_name: values.first_name,
+          last_name: values.last_name,
+          role_ids: values.roles
+            .map((name) => roleIdByName.get(name))
+            .filter((id): id is number => id != null),
+        },
+      });
+      await queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      toast.success(t("people.newUser.tCreated"));
+      navigate({ to: "/users" });
+    } catch (err) {
+      const info = parseServerError(err);
+      if (info.fieldErrors) {
+        for (const [field, msg] of Object.entries(info.fieldErrors)) {
+          if (field in values || ["email", "phone", "password", "first_name", "last_name"].includes(field)) {
+            setError(field as keyof Values, {
+              message: Array.isArray(msg) ? msg[0] : String(msg),
+            });
+          }
+        }
+      }
+      toast.error(info.message);
+    }
   }
 
   return (

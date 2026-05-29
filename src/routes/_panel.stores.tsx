@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Store as StoreIcon,
   ShieldCheck,
@@ -37,15 +38,77 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT, type TFunction } from "@/lib/i18n";
+import { parseServerError } from "@/lib/api/error";
 import {
-  STORES,
-  VENDORS,
-  type StoreRow,
-  type StoreStatus,
-  type AccountType,
-} from "@/lib/mock/people";
+  listStores,
+  transitionStoreStatus,
+  type AdminStoreListItem,
+} from "@/lib/api/stores.admin.functions";
+
+// Frozen-UI local row shape (was imported from mock/people). The §10 table
+// renders these names; they are mapped from the BE StoreList item below.
+type StoreStatus =
+  | "UNVERIFIED"
+  | "PENDING_VERIFICATION"
+  | "PENDING_PAYMENT"
+  | "VERIFIED"
+  | "BLOCKED";
+type AccountType = "INDIVIDUAL" | "COMPANY";
+
+interface StoreRow {
+  id: string;
+  shop_name: string;
+  logo: string;
+  status: StoreStatus;
+  account_type: AccountType;
+  rank: number;
+  // ENTRY 025 — vendor/products/orders/created_at/about are not on the BE
+  // StoreList schema; rendered as neutral placeholders until exposed.
+  vendor: string | null;
+  order_online: boolean;
+  returns: boolean;
+  chat: boolean;
+  asset_sharing: boolean;
+  products: number;
+  orders: number;
+  created_at: string;
+  about: string;
+}
+
+function initials(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase() ?? "")
+    .join("");
+}
+
+function mapStore(s: AdminStoreListItem): StoreRow {
+  return {
+    id: s.id,
+    shop_name: s.shop_name,
+    logo: initials(s.shop_name) || "ST",
+    status: s.status,
+    account_type: s.account_type,
+    rank: s.rank,
+    vendor: null,
+    order_online: s.order_online,
+    returns: s.returns,
+    chat: s.chat,
+    asset_sharing: s.asset_sharing,
+    products: 0,
+    orders: 0,
+    created_at: "",
+    about: "",
+  };
+}
+
+// Vendor filter has no BE backing (ENTRY 025) — kept empty so the picker shows
+// only "all".
+const VENDORS: string[] = [];
 
 // StatusBadge's map doesn't carry the StoreStatusEnum keys, so render the badge
 // inline with the same visual language (matching shared/StatusBadge classes).
@@ -92,7 +155,8 @@ function StoresPage() {
   const t = useT();
   const navigate = useNavigate();
   const perms = usePermissions();
-  const state = usePageState();
+  const previewState = usePageState();
+  const queryClient = useQueryClient();
 
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<StoreStatus | "all">("all");
@@ -102,9 +166,38 @@ function StoresPage() {
   const [chat, setChat] = useState<YesNo>("any");
   const [vendor, setVendor] = useState<string>("all");
 
+  // Live stores list (STAFF -> all, paginated; STORE -> own store, BE-scoped).
+  const storesQuery = useQuery({
+    queryKey: ["admin-stores"],
+    queryFn: () => listStores({ data: { page_size: 200 } }),
+    staleTime: 30 * 1000,
+  });
+
+  const allRows: StoreRow[] = useMemo(
+    () => (storesQuery.data?.results ?? []).map(mapStore),
+    [storesQuery.data],
+  );
+
+  const state: PageState =
+    previewState !== "populated"
+      ? previewState
+      : storesQuery.isLoading
+        ? "loading"
+        : storesQuery.isError
+          ? "error"
+          : "populated";
+
+  // Quick status transition from the row menu (Suspend = -> BLOCKED).
+  const transitionMutation = useMutation({
+    mutationFn: (vars: { id: string; status: StoreStatus }) =>
+      transitionStoreStatus({ data: { id: vars.id, status: vars.status } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["admin-stores"] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
   const rows = useMemo(
     () =>
-      STORES.filter((s) => {
+      allRows.filter((s) => {
         if (search && !s.shop_name.toLowerCase().includes(search.toLowerCase())) return false;
         if (status !== "all" && s.status !== status) return false;
         if (accountType !== "all" && s.account_type !== accountType) return false;
@@ -114,12 +207,12 @@ function StoresPage() {
         if (vendor !== "all" && s.vendor !== vendor) return false;
         return true;
       }),
-    [search, status, accountType, orderOnline, returns, chat, vendor],
+    [allRows, search, status, accountType, orderOnline, returns, chat, vendor],
   );
 
-  const verified = STORES.filter((s) => s.status === "VERIFIED").length;
-  const pending = STORES.filter((s) => s.status === "PENDING_VERIFICATION").length;
-  const blocked = STORES.filter((s) => s.status === "BLOCKED").length;
+  const verified = allRows.filter((s) => s.status === "VERIFIED").length;
+  const pending = allRows.filter((s) => s.status === "PENDING_VERIFICATION").length;
+  const blocked = allRows.filter((s) => s.status === "BLOCKED").length;
 
   function open(s: StoreRow) {
     navigate({ to: "/stores/$id", params: { id: s.id } });
@@ -256,7 +349,7 @@ function StoresPage() {
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             label={t("people.stores.kpiTotal")}
-            value={STORES.length}
+            value={allRows.length}
             icon={<StoreIcon className="h-5 w-5" />}
             accent
           />
@@ -376,7 +469,14 @@ function StoresPage() {
                     <ExternalLink className="me-2 h-4 w-4" /> {t("people.stores.actOpen")}
                   </DropdownMenuItem>
                   {perms.has("stores.transition_status") && (
-                    <DropdownMenuItem onClick={() => toast.success(t("people.stores.tSuspended"))}>
+                    <DropdownMenuItem
+                      onClick={() =>
+                        transitionMutation.mutate(
+                          { id: s.id, status: "BLOCKED" },
+                          { onSuccess: () => toast.success(t("people.stores.tSuspended")) },
+                        )
+                      }
+                    >
                       <Pause className="me-2 h-4 w-4" /> {t("people.stores.actSuspend")}
                     </DropdownMenuItem>
                   )}

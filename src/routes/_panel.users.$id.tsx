@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useMemo } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -31,17 +32,63 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
+import { parseServerError } from "@/lib/api/error";
 import {
-  PEOPLE_USERS,
-  ROLE_OPTIONS,
-  USER_POLICIES,
-  DEVICE_TOKENS,
-  AUDIT_ENTRIES,
-  type UserRow,
-} from "@/lib/mock/people";
-import { PERMISSIONS } from "@/lib/mock-data";
+  getUser,
+  updateUser,
+  resetUserPassword,
+  assignRole,
+  removeRole,
+  listUserDevices,
+  type AdminUser,
+  type AdminDeviceToken,
+} from "@/lib/api/users.functions";
+import { listRoles, type Role } from "@/lib/api/rbac.functions";
+
+// Frozen-UI local row shape (was mock UserRow). Mapped from BE AdminUser.
+interface UserRow {
+  id: string;
+  first_name: string;
+  last_name: string;
+  username: string;
+  email: string;
+  phone: string;
+  type: "STAFF" | "STORE" | "CUSTOMER";
+  is_active: boolean;
+  is_superuser: boolean;
+  register_completed: boolean;
+  roles: string[];
+  wallet_balance: number;
+  password_reset_version: number;
+  last_login: string;
+  date_joined: string;
+}
+
+function fmt(dt: string | null | undefined): string {
+  return (dt ?? "").slice(0, 16).replace("T", " ");
+}
+
+function mapUser(u: AdminUser): UserRow {
+  return {
+    id: u.id,
+    first_name: u.first_name,
+    last_name: u.last_name,
+    username: u.username,
+    email: u.email,
+    phone: u.phone ?? "",
+    type: u.type,
+    is_active: u.is_active,
+    is_superuser: u.is_superuser,
+    register_completed: u.register_completed,
+    roles: u.roles,
+    wallet_balance: 0,
+    password_reset_version: u.password_reset_version,
+    last_login: fmt(u.last_login),
+    date_joined: fmt(u.date_joined),
+  };
+}
 
 export const Route = createFileRoute("/_panel/users/$id")({
   head: () => ({ meta: [{ title: "User — Mixlebs Admin" }] }),
@@ -61,14 +108,38 @@ function UserDetail() {
   const t = useT();
   const { id } = Route.useParams();
   const perms = usePermissions();
-  const state = usePageState();
-  const u = PEOPLE_USERS.find((x) => x.id === id) ?? PEOPLE_USERS[0];
+  const previewState = usePageState();
+
+  const userQuery = useQuery({
+    queryKey: ["admin-user", id],
+    queryFn: () => getUser({ data: { id } }),
+    staleTime: 30 * 1000,
+  });
+  const u: UserRow | null = useMemo(
+    () => (userQuery.data ? mapUser(userQuery.data) : null),
+    [userQuery.data],
+  );
+
+  const state: PageState =
+    previewState !== "populated"
+      ? previewState
+      : userQuery.isLoading
+        ? "loading"
+        : userQuery.isError
+          ? "error"
+          : "populated";
+
+  const resetMutation = useMutation({
+    mutationFn: () => resetUserPassword({ data: { id } }),
+    onSuccess: () => toast.success(t("people.users.tReset")),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
 
   return (
     <div className="p-6">
       <PageHeader
-        title={`${u.first_name} ${u.last_name}`}
-        description={`${u.email} · ${t(`people.users.type${u.type}`)}`}
+        title={u ? `${u.first_name} ${u.last_name}` : ""}
+        description={u ? `${u.email} · ${t(`people.users.type${u.type}`)}` : ""}
         actions={
           <>
             <Button variant="ghost" asChild>
@@ -77,7 +148,11 @@ function UserDetail() {
               </Link>
             </Button>
             <Can perm="users.reset_password">
-              <Button variant="outline" onClick={() => toast.success(t("people.users.tReset"))}>
+              <Button
+                variant="outline"
+                onClick={() => resetMutation.mutate()}
+                disabled={resetMutation.isPending}
+              >
                 <KeyRound className="me-1.5 h-4 w-4" /> {t("people.users.sendReset")}
               </Button>
             </Can>
@@ -95,58 +170,62 @@ function UserDetail() {
       />
 
       <PageStates state={state} missingPerms={["users.view"]}>
-        <Card className="border-0 bg-gradient-surface p-6 shadow-soft">
-          <div className="flex flex-wrap items-center gap-4">
-            <Avatar className="h-16 w-16">
-              <AvatarFallback className="bg-gradient-primary text-lg font-bold text-primary-foreground">
-                {u.first_name[0]}
-                {u.last_name[0]}
-              </AvatarFallback>
-            </Avatar>
-            <div className="flex-1">
-              <div className="flex items-center gap-2">
-                <h2 className="font-display text-2xl font-bold">
-                  {u.first_name} {u.last_name}
-                </h2>
-                <Badge>{t(`people.users.type${u.type}`)}</Badge>
-                {u.is_superuser && (
-                  <Badge variant="outline" className="border-warning/40 text-warning">
-                    <Shield className="me-1 h-3 w-3" /> {t("people.users.colSuperuser")}
-                  </Badge>
-                )}
+        {u && (
+          <>
+            <Card className="border-0 bg-gradient-surface p-6 shadow-soft">
+              <div className="flex flex-wrap items-center gap-4">
+                <Avatar className="h-16 w-16">
+                  <AvatarFallback className="bg-gradient-primary text-lg font-bold text-primary-foreground">
+                    {u.first_name[0]}
+                    {u.last_name[0]}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <h2 className="font-display text-2xl font-bold">
+                      {u.first_name} {u.last_name}
+                    </h2>
+                    <Badge>{t(`people.users.type${u.type}`)}</Badge>
+                    {u.is_superuser && (
+                      <Badge variant="outline" className="border-warning/40 text-warning">
+                        <Shield className="me-1 h-3 w-3" /> {t("people.users.colSuperuser")}
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="mt-1 text-sm text-muted-foreground" dir="ltr">
+                    {u.email} · {u.phone}
+                  </p>
+                </div>
               </div>
-              <p className="mt-1 text-sm text-muted-foreground" dir="ltr">
-                {u.email} · {u.phone}
-              </p>
-            </div>
-          </div>
-        </Card>
+            </Card>
 
-        <Tabs defaultValue="profile" className="mt-6">
-          <TabsList className="bg-muted/50">
-            <TabsTrigger value="profile">{t("people.users.tabProfile")}</TabsTrigger>
-            {perms.role === "admin" && (
-              <TabsTrigger value="rbac">{t("people.users.tabRbac")}</TabsTrigger>
-            )}
-            <TabsTrigger value="devices">{t("people.users.tabDevices")}</TabsTrigger>
-            <TabsTrigger value="audit">{t("people.users.tabAudit")}</TabsTrigger>
-          </TabsList>
+            <Tabs defaultValue="profile" className="mt-6">
+              <TabsList className="bg-muted/50">
+                <TabsTrigger value="profile">{t("people.users.tabProfile")}</TabsTrigger>
+                {perms.role === "admin" && (
+                  <TabsTrigger value="rbac">{t("people.users.tabRbac")}</TabsTrigger>
+                )}
+                <TabsTrigger value="devices">{t("people.users.tabDevices")}</TabsTrigger>
+                <TabsTrigger value="audit">{t("people.users.tabAudit")}</TabsTrigger>
+              </TabsList>
 
-          <TabsContent value="profile" className="mt-6">
-            <ProfileTab u={u} />
-          </TabsContent>
-          {perms.role === "admin" && (
-            <TabsContent value="rbac" className="mt-6">
-              <RbacTab u={u} />
-            </TabsContent>
-          )}
-          <TabsContent value="devices" className="mt-6">
-            <DevicesTab />
-          </TabsContent>
-          <TabsContent value="audit" className="mt-6">
-            <AuditTab />
-          </TabsContent>
-        </Tabs>
+              <TabsContent value="profile" className="mt-6">
+                <ProfileTab u={u} />
+              </TabsContent>
+              {perms.role === "admin" && (
+                <TabsContent value="rbac" className="mt-6">
+                  <RbacTab u={u} />
+                </TabsContent>
+              )}
+              <TabsContent value="devices" className="mt-6">
+                <DevicesTab userId={id} />
+              </TabsContent>
+              <TabsContent value="audit" className="mt-6">
+                <AuditTab />
+              </TabsContent>
+            </Tabs>
+          </>
+        )}
       </PageStates>
     </div>
   );
@@ -155,11 +234,13 @@ function UserDetail() {
 function ProfileTab({ u }: { u: UserRow }) {
   const t = useT();
   const canEdit = usePermissions().has("users.update");
+  const queryClient = useQueryClient();
   const {
     register,
     handleSubmit,
     watch,
     setValue,
+    setError,
     formState: { errors, isSubmitting },
   } = useForm<ProfileValues>({
     resolver: zodResolver(profileSchema),
@@ -171,8 +252,34 @@ function ProfileTab({ u }: { u: UserRow }) {
       is_active: u.is_active,
     },
   });
-  function onSubmit() {
-    toast.success(t("people.users.tSaved"));
+  async function onSubmit(values: ProfileValues) {
+    try {
+      await updateUser({
+        data: {
+          id: u.id,
+          first_name: values.first_name,
+          last_name: values.last_name,
+          email: values.email,
+          phone: values.phone,
+          is_active: values.is_active,
+        },
+      });
+      await queryClient.invalidateQueries({ queryKey: ["admin-user", u.id] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      toast.success(t("people.users.tSaved"));
+    } catch (err) {
+      const info = parseServerError(err);
+      if (info.fieldErrors) {
+        for (const [field, msg] of Object.entries(info.fieldErrors)) {
+          if (["first_name", "last_name", "email", "phone", "is_active"].includes(field)) {
+            setError(field as keyof ProfileValues, {
+              message: Array.isArray(msg) ? msg[0] : String(msg),
+            });
+          }
+        }
+      }
+      toast.error(info.message);
+    }
   }
 
   return (
@@ -254,6 +361,53 @@ function ReadRow({ label, value, mono }: { label: string; value: string; mono?: 
 
 function RbacTab({ u }: { u: UserRow }) {
   const t = useT();
+  const queryClient = useQueryClient();
+
+  const rolesQuery = useQuery({
+    queryKey: ["rbac-roles", "picker"],
+    queryFn: () => listRoles({ data: { page_size: 200 } }),
+    staleTime: 60 * 1000,
+  });
+  const roleList: Role[] = rolesQuery.data?.results ?? [];
+  const roleIdByName = useMemo(() => {
+    const m = new Map<string, number>();
+    roleList.forEach((r) => m.set(r.name, r.id));
+    return m;
+  }, [roleList]);
+
+  const invalidate = () => void queryClient.invalidateQueries({ queryKey: ["admin-user", u.id] });
+
+  const assignMutation = useMutation({
+    mutationFn: (roleName: string) => {
+      const roleId = roleIdByName.get(roleName);
+      if (roleId == null) throw new Error("Unknown role");
+      return assignRole({ data: { id: u.id, role_id: roleId } });
+    },
+    onSuccess: () => {
+      invalidate();
+      toast.success(t("people.users.tRoleAdded"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const removeMutation = useMutation({
+    mutationFn: (roleName: string) => {
+      const roleId = roleIdByName.get(roleName);
+      if (roleId == null) throw new Error("Unknown role");
+      return removeRole({ data: { id: u.id, role_id: roleId } });
+    },
+    onSuccess: () => {
+      invalidate();
+      toast.success(t("people.users.tRoleRemoved"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  // Per-user UserPolicy attach/detach and the flattened effective-permission
+  // list have no dedicated endpoint in the P7 administration BE (ENTRY 029);
+  // those two cards render empty until that surface lands.
+  const USER_POLICIES: { id: string; name: string; type: "positive" | "negative"; description: string }[] = [];
+  const PERMISSIONS: string[] = [];
+
   return (
     <div className="space-y-4">
       <Card className="border-0 bg-card p-6 shadow-soft">
@@ -262,25 +416,24 @@ function RbacTab({ u }: { u: UserRow }) {
           {u.roles.map((r) => (
             <Badge key={r} className="gap-1.5 px-3 py-1.5">
               {r}
-              <button
-                aria-label={t("common.remove")}
-                onClick={() => toast.success(t("people.users.tRoleRemoved"))}
-              >
+              <button aria-label={t("common.remove")} onClick={() => removeMutation.mutate(r)}>
                 <X className="h-3 w-3" />
               </button>
             </Badge>
           ))}
-          <Select onValueChange={() => toast.success(t("people.users.tRoleAdded"))}>
+          <Select onValueChange={(r) => assignMutation.mutate(r)}>
             <SelectTrigger className="h-8 w-auto gap-1.5">
               <Plus className="h-3.5 w-3.5" />
               <SelectValue placeholder={t("people.users.rbacAddRole")} />
             </SelectTrigger>
             <SelectContent>
-              {ROLE_OPTIONS.filter((r) => !u.roles.includes(r)).map((r) => (
-                <SelectItem key={r} value={r}>
-                  {r}
-                </SelectItem>
-              ))}
+              {roleList
+                .filter((r) => !u.roles.includes(r.name))
+                .map((r) => (
+                  <SelectItem key={r.id} value={r.name}>
+                    {r.name}
+                  </SelectItem>
+                ))}
             </SelectContent>
           </Select>
         </div>
@@ -351,8 +504,15 @@ function RbacTab({ u }: { u: UserRow }) {
   );
 }
 
-function DevicesTab() {
+function DevicesTab({ userId }: { userId: string }) {
   const t = useT();
+  const devicesQuery = useQuery({
+    queryKey: ["admin-user-devices", userId],
+    queryFn: () => listUserDevices({ data: { id: userId } }),
+    staleTime: 30 * 1000,
+  });
+  const devices: AdminDeviceToken[] = devicesQuery.data?.results ?? [];
+
   return (
     <Card className="overflow-hidden border-0 shadow-soft">
       <Table>
@@ -367,7 +527,7 @@ function DevicesTab() {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {DEVICE_TOKENS.map((d) => (
+          {devices.map((d) => (
             <TableRow key={d.id}>
               <TableCell>
                 <div className="flex items-center gap-2">
@@ -376,14 +536,12 @@ function DevicesTab() {
                   ) : (
                     <Smartphone className="h-4 w-4 text-muted-foreground" />
                   )}
-                  {d.device_type}
+                  {d.device_type ?? "—"}
                 </div>
               </TableCell>
+              <TableCell className="font-mono text-xs text-muted-foreground">{d.token}</TableCell>
               <TableCell className="font-mono text-xs text-muted-foreground">
-                {d.token.slice(0, 4)}…{d.token.slice(-4)}
-              </TableCell>
-              <TableCell className="font-mono text-xs text-muted-foreground">
-                …{d.endpoint_arn.slice(-12)}
+                {d.endpoint_arn}
               </TableCell>
               <TableCell>
                 <Badge
@@ -397,8 +555,10 @@ function DevicesTab() {
                   {t(d.is_valid ? "people.users.devValidBadge" : "people.users.devInvalidBadge")}
                 </Badge>
               </TableCell>
-              <TableCell className="text-sm text-muted-foreground">{d.created_at}</TableCell>
+              <TableCell className="text-sm text-muted-foreground">—</TableCell>
               <TableCell>
+                {/* Revoking another user's device has no BE endpoint (only the
+                    self-service /account/devices/{id}/ exists) — ENTRY 029. */}
                 <Button
                   size="sm"
                   variant="ghost"
@@ -418,6 +578,18 @@ function DevicesTab() {
 
 function AuditTab() {
   const t = useT();
+  // The per-user audit trail is served by the Phase 8 /admin/audit-log surface;
+  // there is no per-user audit endpoint in the P7 administration BE (ENTRY 029),
+  // so this tab renders an empty trail until P8 wires the shared audit query.
+  const AUDIT_ENTRIES: {
+    id: string;
+    timestamp: string;
+    method: string;
+    url: string;
+    status: number;
+    request_id: string;
+    ip: string;
+  }[] = [];
   return (
     <Card className="overflow-hidden border-0 shadow-soft">
       <Table>

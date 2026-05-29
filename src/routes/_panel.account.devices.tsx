@@ -1,4 +1,6 @@
+import { useMemo } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Smartphone, Monitor, Apple, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -8,20 +10,76 @@ import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { PageStates, TableSkeleton } from "@/components/shared/states";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
-import { ACCOUNT_DEVICES, type DeviceTokenRow } from "@/lib/mock/account";
+import { parseServerError } from "@/lib/api/error";
+import { listDevices, revokeDevice, type AdminDeviceToken } from "@/lib/api/account.functions";
 
 export const Route = createFileRoute("/_panel/account/devices")({
   head: () => ({ meta: [{ title: "Devices — Mixlebs Admin" }] }),
   component: DevicesPage,
 });
 
+// Frozen-UI local row shape (was mock DeviceTokenRow). Mapped from the BE
+// DeviceToken; `label`/`created_at` are not on the schema (ENTRY 030).
+type DeviceType = "IOS" | "ANDROID" | "WEB";
+interface DeviceTokenRow {
+  id: string;
+  device_type: DeviceType;
+  label: string;
+  is_valid: boolean;
+  created_at: string;
+}
+
 const TYPE_ICON = { IOS: Apple, ANDROID: Smartphone, WEB: Monitor } as const;
+
+function normType(ty: string | null): DeviceType {
+  const v = (ty ?? "").toUpperCase();
+  return v === "IOS" || v === "ANDROID" || v === "WEB" ? (v as DeviceType) : "WEB";
+}
+
+function mapDevice(d: AdminDeviceToken): DeviceTokenRow {
+  return {
+    id: String(d.id),
+    device_type: normType(d.device_type),
+    label: d.token,
+    is_valid: d.is_valid,
+    created_at: "",
+  };
+}
 
 function DevicesPage() {
   const t = useT();
-  const state = usePageState();
+  const previewState = usePageState();
+  const queryClient = useQueryClient();
+
+  const devicesQuery = useQuery({
+    queryKey: ["account-devices"],
+    queryFn: () => listDevices(),
+    staleTime: 30 * 1000,
+  });
+  const ACCOUNT_DEVICES: DeviceTokenRow[] = useMemo(
+    () => (devicesQuery.data?.results ?? []).map(mapDevice),
+    [devicesQuery.data],
+  );
+
+  const state: PageState =
+    previewState !== "populated"
+      ? previewState
+      : devicesQuery.isLoading
+        ? "loading"
+        : devicesQuery.isError
+          ? "error"
+          : "populated";
+
+  const revokeMutation = useMutation({
+    mutationFn: (rowId: string) => revokeDevice({ data: { id: Number(rowId) } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["account-devices"] });
+      toast.success(t("account.deviceRevoked"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
 
   const typeLabel = (ty: DeviceTokenRow["device_type"]) =>
     ty === "IOS"
@@ -101,7 +159,7 @@ function DevicesPage() {
                 description={t("account.revokeDeviceDesc")}
                 confirmLabel={t("account.revokeDevice")}
                 destructive
-                onConfirm={() => toast.success(t("account.deviceRevoked"))}
+                onConfirm={() => revokeMutation.mutate(r.id)}
                 trigger={
                   <Button size="sm" variant="ghost" className="text-destructive">
                     <Trash2 className="me-1.5 h-3.5 w-3.5" /> {t("account.revokeDevice")}

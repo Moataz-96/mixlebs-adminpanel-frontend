@@ -12,7 +12,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
-import { apiGet } from "./_client";
+import { apiGet, apiPatch, apiPost } from "./_client";
 import { toClientError } from "./error";
 
 export interface Page<T> {
@@ -75,6 +75,162 @@ export const listStores = createServerFn({ method: "GET" })
   .handler(async ({ data }) => {
     try {
       return await apiGet<Page<AdminStoreListItem>>(`/api/admin/v1/stores/${listQuery(data)}`);
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+// --------------------------------------------------------------------------- #
+// Store detail (6-tab screen): GET / PATCH / transition / identity review /
+// replace_document. Field names mirror openapi.json StoreDetail / StoreIdentityFull.
+// --------------------------------------------------------------------------- #
+
+export interface StoreInfoLocale {
+  id: number;
+  language_code: string;
+  name: string;
+  about: string;
+  features: string;
+  target_audience: string;
+  selling_promotions: string;
+}
+
+export interface StoreWorkingDay {
+  id?: number;
+  day: string; // DayEnum name
+  start_time: string; // "HH:MM[:SS]"
+  end_time: string;
+}
+
+export interface StoreIdentitySummary {
+  has_identity: boolean;
+  account_type: AdminStoreAccountType | null;
+  documents_count: number;
+  submitted_at: string | null;
+}
+
+export interface AdminStoreDetail {
+  id: string;
+  user_id: string;
+  owner_email: string | null;
+  shop_name: string;
+  status: AdminStoreStatus;
+  banner_label_key: string;
+  account_type: AdminStoreAccountType;
+  rank: number;
+  order_online: boolean;
+  returns: boolean;
+  chat: boolean;
+  asset_sharing: boolean;
+  categories: number[];
+  info: Record<string, StoreInfoLocale>;
+  working_days: StoreWorkingDay[];
+  identity_summary: StoreIdentitySummary;
+  legal_transitions: AdminStoreStatus[];
+}
+
+export interface StoreIdentityFull {
+  id: number;
+  identity: string | null;
+  first_name: string;
+  middle_name: string;
+  last_name: string;
+  business_name: string;
+  business_license_number: string;
+  residential_address: string;
+  country_of_issue: string;
+  expiration_date: string | null;
+  dob: string | null;
+  front_document_id: number | null;
+  back_document_id: number | null;
+  supporting_document_ids: number[];
+}
+
+export const getStore = createServerFn({ method: "GET" })
+  .inputValidator((d: { id: string }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiGet<AdminStoreDetail>(`/api/admin/v1/stores/${data.id}/`);
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+const storeUpdateInput = z.object({
+  id: z.string(),
+  shop_name: z.string().optional(),
+  rank: z.number().optional(),
+  account_type: z.enum(["INDIVIDUAL", "COMPANY"]).optional(),
+  order_online: z.boolean().optional(),
+  returns: z.boolean().optional(),
+  chat: z.boolean().optional(),
+  asset_sharing: z.boolean().optional(),
+  working_days: z
+    .array(
+      z.object({
+        day: z.string(),
+        start_time: z.string(),
+        end_time: z.string(),
+      }),
+    )
+    .optional(),
+});
+
+export const updateStore = createServerFn({ method: "POST" })
+  .inputValidator(storeUpdateInput)
+  .handler(async ({ data }) => {
+    const { id, ...body } = data;
+    try {
+      return await apiPatch<AdminStoreDetail>(`/api/admin/v1/stores/${id}/`, body);
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+export const transitionStoreStatus = createServerFn({ method: "POST" })
+  .inputValidator((d: { id: string; status: AdminStoreStatus; reason?: string }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiPost<AdminStoreDetail>(
+        `/api/admin/v1/stores/${data.id}/transition_status/`,
+        { status: data.status, reason: data.reason ?? "" },
+      );
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+export const getStoreIdentity = createServerFn({ method: "GET" })
+  .inputValidator((d: { id: string }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiGet<StoreIdentityFull>(`/api/admin/v1/stores/${data.id}/identity/`);
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+export const reviewIdentity = createServerFn({ method: "POST" })
+  .inputValidator((d: { id: string; decision: "approve" | "reject"; reason?: string }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiPost<AdminStoreDetail>(`/api/admin/v1/stores/${data.id}/identity/review/`, {
+        decision: data.decision,
+        reason: data.reason ?? "",
+      });
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+export const replaceDocument = createServerFn({ method: "POST" })
+  .inputValidator((d: { id: string; asset_id: number; side: "front" | "back" | "supporting" }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiPost<StoreIdentityFull>(
+        `/api/admin/v1/stores/${data.id}/identity/replace_document/`,
+        { asset_id: data.asset_id, side: data.side },
+      );
     } catch (err) {
       throw toClientError(err);
     }

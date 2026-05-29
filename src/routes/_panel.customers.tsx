@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   UserRound,
   Ban,
@@ -33,9 +34,43 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
-import { PEOPLE_CUSTOMERS, type CustomerRow, type Gender } from "@/lib/mock/people";
+import { parseServerError } from "@/lib/api/error";
+import { listCustomers, blockReturns, type AdminCustomer } from "@/lib/api/customers.functions";
+
+// Frozen-UI local row shape (was mock CustomerRow). Mapped from BE Customer;
+// orders / total_spent are not on the Customer schema (ENTRY 025) -> 0.
+type Gender = "MALE" | "FEMALE" | "OTHER";
+interface CustomerRow {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  gender: Gender;
+  dob: string;
+  orders: number;
+  total_spent: number;
+  wallet_balance: number;
+  is_return_blocked: boolean;
+  date_joined: string;
+}
+
+function mapCustomer(c: AdminCustomer): CustomerRow {
+  return {
+    id: c.id,
+    name: `${c.first_name} ${c.last_name}`.trim(),
+    email: c.email,
+    phone: c.phone ?? "",
+    gender: (c.gender ?? "OTHER") as Gender,
+    dob: c.dob ?? "",
+    orders: 0,
+    total_spent: 0,
+    wallet_balance: Number(c.wallet) || 0,
+    is_return_blocked: c.is_return_blocked,
+    date_joined: (c.date_joined ?? "").slice(0, 10),
+  };
+}
 
 export const Route = createFileRoute("/_panel/customers")({
   head: () => ({ meta: [{ title: "Customers — Mixlebs Admin" }] }),
@@ -49,17 +84,46 @@ function CustomersPage() {
   const navigate = useNavigate();
   const perms = usePermissions();
   const pageState = usePageState();
-  // Staff-side only: STORE users lack customers.view → forbidden.
-  const state = perms.has("customers.view") ? pageState : "forbidden";
+  const queryClient = useQueryClient();
+  const canView = perms.has("customers.view");
 
   const [search, setSearch] = useState("");
   const [gender, setGender] = useState<Gender | "all">("all");
   const [blocked, setBlocked] = useState<"all" | "yes" | "no">("all");
   const [hasOrders, setHasOrders] = useState<"all" | "yes" | "no">("all");
 
+  const customersQuery = useQuery({
+    queryKey: ["admin-customers"],
+    queryFn: () => listCustomers({ data: { page_size: 200 } }),
+    enabled: canView,
+    staleTime: 30 * 1000,
+  });
+  const allRows: CustomerRow[] = useMemo(
+    () => (customersQuery.data?.results ?? []).map(mapCustomer),
+    [customersQuery.data],
+  );
+
+  // Staff-side only: STORE users lack customers.view → forbidden.
+  const state: PageState = !canView
+    ? "forbidden"
+    : pageState !== "populated"
+      ? pageState
+      : customersQuery.isLoading
+        ? "loading"
+        : customersQuery.isError
+          ? "error"
+          : "populated";
+
+  const blockMutation = useMutation({
+    mutationFn: (c: CustomerRow) =>
+      blockReturns({ data: { id: c.id, is_return_blocked: !c.is_return_blocked } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["admin-customers"] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
   const rows = useMemo(
     () =>
-      PEOPLE_CUSTOMERS.filter((c) => {
+      allRows.filter((c) => {
         const hay = `${c.name} ${c.email} ${c.phone}`.toLowerCase();
         if (search && !hay.includes(search.toLowerCase())) return false;
         if (gender !== "all" && c.gender !== gender) return false;
@@ -67,13 +131,13 @@ function CustomersPage() {
         if (hasOrders !== "all" && c.orders > 0 !== (hasOrders === "yes")) return false;
         return true;
       }),
-    [search, gender, blocked, hasOrders],
+    [allRows, search, gender, blocked, hasOrders],
   );
 
-  const total = PEOPLE_CUSTOMERS.length;
-  const orders = PEOPLE_CUSTOMERS.reduce((a, c) => a + c.orders, 0);
-  const ltv = PEOPLE_CUSTOMERS.reduce((a, c) => a + c.total_spent, 0);
-  const blockedCount = PEOPLE_CUSTOMERS.filter((c) => c.is_return_blocked).length;
+  const total = allRows.length;
+  const orders = allRows.reduce((a, c) => a + c.orders, 0);
+  const ltv = allRows.reduce((a, c) => a + c.total_spent, 0);
+  const blockedCount = allRows.filter((c) => c.is_return_blocked).length;
 
   function open(c: CustomerRow) {
     navigate({ to: "/customers/$id", params: { id: c.id } });
@@ -282,13 +346,16 @@ function CustomersPage() {
                     <DropdownMenuItem
                       className={c.is_return_blocked ? "" : "text-destructive"}
                       onClick={() =>
-                        toast.success(
-                          t(
-                            c.is_return_blocked
-                              ? "people.customers.tUnblocked"
-                              : "people.customers.tBlocked",
-                          ),
-                        )
+                        blockMutation.mutate(c, {
+                          onSuccess: () =>
+                            toast.success(
+                              t(
+                                c.is_return_blocked
+                                  ? "people.customers.tUnblocked"
+                                  : "people.customers.tBlocked",
+                              ),
+                            ),
+                        })
                       }
                     >
                       <Ban className="me-2 h-4 w-4" />{" "}

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { Mail, Download, BellRing, MessageSquare, MoreHorizontal, Eye } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -16,9 +17,37 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
-import { SUBSCRIBERS, PEOPLE_CUSTOMERS, type SubscriberRow } from "@/lib/mock/people";
+import { useApp } from "@/lib/app-context";
+import { listSubscribers, type AdminSubscriber } from "@/lib/api/subscribers.functions";
+
+// Frozen-UI local row shape (was mock SubscriberRow). Mapped from BE Subscriber.
+interface SubscriberRow {
+  id: string;
+  customer_id: string;
+  name: string;
+  email: string;
+  phone: string;
+  recieve_notifications: boolean;
+  recieve_emails: boolean;
+  recieve_sms: boolean;
+  subscribed_at: string;
+}
+
+function mapSubscriber(s: AdminSubscriber): SubscriberRow {
+  return {
+    id: String(s.id),
+    customer_id: s.customer_id,
+    name: s.customer_name,
+    email: s.customer_email,
+    phone: s.customer_phone ?? "",
+    recieve_notifications: s.recieve_notifications,
+    recieve_emails: s.recieve_emails,
+    recieve_sms: s.recieve_sms,
+    subscribed_at: (s.subscribed_at ?? "").slice(0, 10),
+  };
+}
 
 export const Route = createFileRoute("/_panel/subscribers")({
   head: () => ({ meta: [{ title: "Subscribers — Mixlebs Admin" }] }),
@@ -30,25 +59,49 @@ function SubscribersPage() {
   const navigate = useNavigate();
   const perms = usePermissions();
   const pageState = usePageState();
-  const state = perms.has("subscribers.view") ? pageState : "forbidden";
+  const { currentStoreId } = useApp();
+  const canView = perms.has("subscribers.view");
   const [search, setSearch] = useState("");
+
+  // STAFF/ADMIN scope to the topbar store picker (null = all the BE allows);
+  // STORE users are auto-scoped on the BE.
+  const subsQuery = useQuery({
+    queryKey: ["admin-subscribers", currentStoreId],
+    queryFn: () =>
+      listSubscribers({ data: { store_id: currentStoreId ?? undefined, page_size: 200 } }),
+    enabled: canView,
+    staleTime: 30 * 1000,
+  });
+  const allRows: SubscriberRow[] = useMemo(
+    () => (subsQuery.data?.results ?? []).map(mapSubscriber),
+    [subsQuery.data],
+  );
+
+  const state: PageState = !canView
+    ? "forbidden"
+    : pageState !== "populated"
+      ? pageState
+      : subsQuery.isLoading
+        ? "loading"
+        : subsQuery.isError
+          ? "error"
+          : "populated";
 
   const rows = useMemo(
     () =>
-      SUBSCRIBERS.filter(
+      allRows.filter(
         (s) =>
           !search || `${s.name} ${s.email} ${s.phone}`.toLowerCase().includes(search.toLowerCase()),
       ),
-    [search],
+    [allRows, search],
   );
 
-  const onNotif = SUBSCRIBERS.filter((s) => s.recieve_notifications).length;
-  const onEmail = SUBSCRIBERS.filter((s) => s.recieve_emails).length;
-  const onSms = SUBSCRIBERS.filter((s) => s.recieve_sms).length;
+  const onNotif = allRows.filter((s) => s.recieve_notifications).length;
+  const onEmail = allRows.filter((s) => s.recieve_emails).length;
+  const onSms = allRows.filter((s) => s.recieve_sms).length;
 
   function viewCustomer(s: SubscriberRow) {
-    const c = PEOPLE_CUSTOMERS.find((x) => x.email === s.email);
-    if (c) navigate({ to: "/customers/$id", params: { id: c.id } });
+    if (s.customer_id) navigate({ to: "/customers/$id", params: { id: s.customer_id } });
   }
 
   const columns: Column<SubscriberRow>[] = [
@@ -125,7 +178,7 @@ function SubscribersPage() {
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             label={t("people.subscribers.kpiTotal")}
-            value={SUBSCRIBERS.length}
+            value={allRows.length}
             icon={<Mail className="h-5 w-5" />}
             accent
           />

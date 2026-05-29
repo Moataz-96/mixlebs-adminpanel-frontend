@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -23,6 +24,8 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n";
+import { parseServerError } from "@/lib/api/error";
+import { getPreferences, updatePreferences } from "@/lib/api/account.functions";
 import { PREF_LOCATIONS, PREF_LANGUAGES, PREF_TIMEZONES } from "@/lib/mock/account";
 
 export const Route = createFileRoute("/_panel/account/preferences")({
@@ -52,15 +55,23 @@ type Values = z.infer<typeof schema>;
 
 function PreferencesPage() {
   const t = useT();
+  const queryClient = useQueryClient();
   const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  const prefsQuery = useQuery({
+    queryKey: ["account-preferences"],
+    queryFn: () => getPreferences(),
+    staleTime: 30 * 1000,
+    retry: false,
+  });
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: {
       latitude: "",
       longitude: "",
-      location_id: "loc_01",
-      language_id: "en",
+      location_id: "",
+      language_id: "",
       timezone: "Asia/Beirut",
       theme: "SYSTEM",
       notification: true,
@@ -71,11 +82,47 @@ function PreferencesPage() {
     register,
     handleSubmit,
     control,
+    reset,
     formState: { errors, isSubmitting },
   } = form;
 
-  function onSubmit(_values: Values) {
-    toast.success(t("account.prefSaved"));
+  // Seed from BE preferences once loaded.
+  useEffect(() => {
+    const p = prefsQuery.data;
+    if (p) {
+      reset({
+        latitude: p.latitude ?? "",
+        longitude: p.longitude ?? "",
+        location_id: p.location_id != null ? String(p.location_id) : "",
+        language_id: p.language_id != null ? String(p.language_id) : "",
+        timezone: p.timezone ?? "Asia/Beirut",
+        theme: (p.theme as Values["theme"]) ?? "SYSTEM",
+        notification: p.notification,
+        filters: p.filters ? JSON.stringify(p.filters, null, 2) : "{}",
+      });
+    }
+  }, [prefsQuery.data, reset]);
+
+  async function onSubmit(values: Values) {
+    try {
+      await updatePreferences({
+        data: {
+          latitude: values.latitude || undefined,
+          longitude: values.longitude || undefined,
+          location_id: values.location_id ? Number(values.location_id) : undefined,
+          language_id: values.language_id ? Number(values.language_id) : undefined,
+          timezone: values.timezone || undefined,
+          // BE ThemeEnum has only LIGHT|DARK; SYSTEM is a FE-only choice.
+          theme: values.theme === "SYSTEM" ? undefined : values.theme,
+          notification: values.notification,
+          filters: values.filters.trim() ? JSON.parse(values.filters) : undefined,
+        },
+      });
+      await queryClient.invalidateQueries({ queryKey: ["account-preferences"] });
+      toast.success(t("account.prefSaved"));
+    } catch (err) {
+      toast.error(parseServerError(err).message);
+    }
   }
 
   const themeOptions: { value: "LIGHT" | "DARK" | "SYSTEM"; label: string; icon: typeof Sun }[] = [

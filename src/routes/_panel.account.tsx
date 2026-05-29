@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -23,7 +24,8 @@ import {
 } from "@/components/ui/dialog";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { useT } from "@/lib/i18n";
-import { ACCOUNT_PROFILE } from "@/lib/mock/account";
+import { parseServerError } from "@/lib/api/error";
+import { getProfile, updateProfile, type AccountProfile } from "@/lib/api/account.functions";
 
 export const Route = createFileRoute("/_panel/account")({
   head: () => ({ meta: [{ title: "Profile — Mixlebs Admin" }] }),
@@ -47,26 +49,75 @@ type Values = z.infer<typeof schema>;
 
 function AccountPage() {
   const t = useT();
-  const p = ACCOUNT_PROFILE;
+  const queryClient = useQueryClient();
   const [avatarRemoved, setAvatarRemoved] = useState(false);
+
+  const profileQuery = useQuery({
+    queryKey: ["account-profile"],
+    queryFn: () => getProfile(),
+    staleTime: 30 * 1000,
+  });
+  const data: AccountProfile | undefined = profileQuery.data;
+  const p = {
+    id: data?.id ?? "",
+    first_name: data?.first_name ?? "",
+    last_name: data?.last_name ?? "",
+    email: data?.email ?? "",
+    phone: data?.phone ?? "",
+    username: data?.username ?? "",
+    type: data?.type ?? "STAFF",
+    register_completed: data?.register_completed ?? false,
+    date_joined: (data?.date_joined ?? "").slice(0, 10),
+    last_login: (data?.last_login ?? "").slice(0, 16).replace("T", " "),
+  };
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: {
-      first_name: p.first_name,
-      last_name: p.last_name,
-      email: p.email,
-      phone: p.phone,
+      first_name: "",
+      last_name: "",
+      email: "",
+      phone: "",
     },
   });
   const {
     register,
     handleSubmit,
+    reset,
+    setError,
     formState: { errors, isSubmitting },
   } = form;
 
-  function onSubmit(_values: Values) {
-    toast.success(t("account.saved"));
+  // Seed the form once the profile loads.
+  useEffect(() => {
+    if (data) {
+      reset({
+        first_name: data.first_name,
+        last_name: data.last_name,
+        email: data.email,
+        phone: data.phone ?? "",
+      });
+    }
+  }, [data, reset]);
+
+  async function onSubmit(values: Values) {
+    try {
+      await updateProfile({ data: values });
+      await queryClient.invalidateQueries({ queryKey: ["account-profile"] });
+      toast.success(t("account.saved"));
+    } catch (err) {
+      const info = parseServerError(err);
+      if (info.fieldErrors) {
+        for (const [field, msg] of Object.entries(info.fieldErrors)) {
+          if (["first_name", "last_name", "email", "phone"].includes(field)) {
+            setError(field as keyof Values, {
+              message: Array.isArray(msg) ? msg[0] : String(msg),
+            });
+          }
+        }
+      }
+      toast.error(info.message);
+    }
   }
 
   const typeLabel =

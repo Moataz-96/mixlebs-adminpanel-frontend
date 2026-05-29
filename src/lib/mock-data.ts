@@ -227,6 +227,8 @@ export const ORDERS: Order[] = [
   },
 ];
 
+// removed: P7 Wire — customers fetched live via listCustomers()/getCustomer();
+// the people screens no longer read this shared mock Customer block.
 export interface Customer {
   id: string;
   name: string;

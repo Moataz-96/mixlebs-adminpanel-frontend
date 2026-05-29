@@ -1,4 +1,6 @@
+import { useMemo } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Mail, Phone, ShoppingBag, Wallet, Ban, BellRing, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -22,23 +24,110 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
-import { PEOPLE_CUSTOMERS, DEVICE_TOKENS, AUDIT_ENTRIES } from "@/lib/mock/people";
-import { ORDERS } from "@/lib/mock-data";
+import { parseServerError } from "@/lib/api/error";
+import { getCustomer, blockReturns, type AdminCustomer } from "@/lib/api/customers.functions";
 
 export const Route = createFileRoute("/_panel/customers/$id")({
   head: () => ({ meta: [{ title: "Customer — Mixlebs Admin" }] }),
   component: CustomerDetail,
 });
 
+// Frozen-UI local row shape. Mapped from BE Customer; orders/total_spent are not
+// on the schema (ENTRY 025). Per-customer orders/returns/reviews/devices/audit
+// have no P7 administration endpoints (ENTRY 029) — those tabs render empty.
+interface CustomerRow {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  gender: "MALE" | "FEMALE" | "OTHER";
+  dob: string;
+  orders: number;
+  total_spent: number;
+  wallet_balance: number;
+  is_return_blocked: boolean;
+  date_joined: string;
+}
+
+function mapCustomer(c: AdminCustomer): CustomerRow {
+  return {
+    id: c.id,
+    name: `${c.first_name} ${c.last_name}`.trim(),
+    email: c.email,
+    phone: c.phone ?? "",
+    gender: (c.gender ?? "OTHER") as CustomerRow["gender"],
+    dob: c.dob ?? "",
+    orders: 0,
+    total_spent: 0,
+    wallet_balance: Number(c.wallet) || 0,
+    is_return_blocked: c.is_return_blocked,
+    date_joined: (c.date_joined ?? "").slice(0, 10),
+  };
+}
+
 function CustomerDetail() {
   const t = useT();
   const { id } = Route.useParams();
   const perms = usePermissions();
   const pageState = usePageState();
-  const state = perms.has("customers.view") ? pageState : "forbidden";
-  const c = PEOPLE_CUSTOMERS.find((x) => x.id === id) ?? PEOPLE_CUSTOMERS[0];
+  const queryClient = useQueryClient();
+  const canView = perms.has("customers.view");
+
+  const customerQuery = useQuery({
+    queryKey: ["admin-customer", id],
+    queryFn: () => getCustomer({ data: { id } }),
+    enabled: canView,
+    staleTime: 30 * 1000,
+  });
+  const c: CustomerRow = useMemo(
+    () =>
+      customerQuery.data
+        ? mapCustomer(customerQuery.data)
+        : {
+            id,
+            name: "",
+            email: "",
+            phone: "",
+            gender: "OTHER",
+            dob: "",
+            orders: 0,
+            total_spent: 0,
+            wallet_balance: 0,
+            is_return_blocked: false,
+            date_joined: "",
+          },
+    [customerQuery.data, id],
+  );
+
+  const state: PageState = !canView
+    ? "forbidden"
+    : pageState !== "populated"
+      ? pageState
+      : customerQuery.isLoading
+        ? "loading"
+        : customerQuery.isError
+          ? "error"
+          : "populated";
+
+  const blockMutation = useMutation({
+    mutationFn: () => blockReturns({ data: { id, is_return_blocked: !c.is_return_blocked } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["admin-customer", id] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-customers"] });
+      toast.success(
+        t(c.is_return_blocked ? "people.customers.tUnblocked" : "people.customers.tBlocked"),
+      );
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  // Per-customer orders / devices / audit have no P7 endpoints (ENTRY 029).
+  const ORDERS: { id: string; number: string; store: string; total: number; status: string; placed: string }[] = [];
+  const DEVICE_TOKENS: { id: number; device_type: string | null; token: string; is_valid: boolean; created_at: string }[] = [];
+  const AUDIT_ENTRIES: { id: string; timestamp: string; method: string; url: string; status: number }[] = [];
+
   const initials = c.name
     .split(" ")
     .map((w) => w[0])
@@ -69,15 +158,8 @@ function CustomerDetail() {
               <Button
                 variant="outline"
                 className={c.is_return_blocked ? "" : "text-destructive"}
-                onClick={() =>
-                  toast.success(
-                    t(
-                      c.is_return_blocked
-                        ? "people.customers.tUnblocked"
-                        : "people.customers.tBlocked",
-                    ),
-                  )
-                }
+                onClick={() => blockMutation.mutate()}
+                disabled={blockMutation.isPending}
               >
                 <Ban className="me-1.5 h-4 w-4" />{" "}
                 {c.is_return_blocked ? t("people.customers.unblock") : t("people.customers.block")}

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
   Users,
@@ -38,9 +39,61 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
-import { PEOPLE_USERS, ROLE_OPTIONS, type UserRow, type UserType } from "@/lib/mock/people";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listUsers,
+  updateUser,
+  resetUserPassword,
+  type AdminUser,
+  type AdminUserType,
+} from "@/lib/api/users.functions";
+
+// Frozen-UI local row shape (was imported from mock/people). Mapped from the BE
+// AdminUser; wallet_balance is not on AdminUser (ENTRY 025) -> 0 placeholder.
+type UserType = AdminUserType;
+interface UserRow {
+  id: string;
+  first_name: string;
+  last_name: string;
+  username: string;
+  email: string;
+  phone: string;
+  type: UserType;
+  is_active: boolean;
+  is_superuser: boolean;
+  register_completed: boolean;
+  roles: string[];
+  wallet_balance: number;
+  password_reset_version: number;
+  last_login: string;
+  date_joined: string;
+}
+
+function fmt(dt: string | null | undefined): string {
+  return (dt ?? "").slice(0, 16).replace("T", " ");
+}
+
+function mapUser(u: AdminUser): UserRow {
+  return {
+    id: u.id,
+    first_name: u.first_name,
+    last_name: u.last_name,
+    username: u.username,
+    email: u.email,
+    phone: u.phone ?? "",
+    type: u.type,
+    is_active: u.is_active,
+    is_superuser: u.is_superuser,
+    register_completed: u.register_completed,
+    roles: u.roles,
+    wallet_balance: 0,
+    password_reset_version: u.password_reset_version,
+    last_login: fmt(u.last_login),
+    date_joined: fmt(u.date_joined),
+  };
+}
 
 export const Route = createFileRoute("/_panel/users")({
   head: () => ({ meta: [{ title: "Users — Mixlebs Admin" }] }),
@@ -58,7 +111,8 @@ function UsersPage() {
   const t = useT();
   const navigate = useNavigate();
   const perms = usePermissions();
-  const state = usePageState();
+  const previewState = usePageState();
+  const queryClient = useQueryClient();
 
   const [search, setSearch] = useState("");
   const [type, setType] = useState<UserType | "all">("all");
@@ -66,9 +120,46 @@ function UsersPage() {
   const [registered, setRegistered] = useState<"all" | "yes" | "no">("all");
   const [role, setRole] = useState("all");
 
+  const usersQuery = useQuery({
+    queryKey: ["admin-users"],
+    queryFn: () => listUsers({ data: { page_size: 200 } }),
+    staleTime: 30 * 1000,
+  });
+  const allRows: UserRow[] = useMemo(
+    () => (usersQuery.data?.results ?? []).map(mapUser),
+    [usersQuery.data],
+  );
+
+  const state: PageState =
+    previewState !== "populated"
+      ? previewState
+      : usersQuery.isLoading
+        ? "loading"
+        : usersQuery.isError
+          ? "error"
+          : "populated";
+
+  // Role filter options derived from the loaded users (RBAC role catalogue is
+  // owned by the P2 /admin/roles surface).
+  const ROLE_OPTIONS = useMemo(
+    () => Array.from(new Set(allRows.flatMap((u) => u.roles))).sort(),
+    [allRows],
+  );
+
+  const toggleActiveMutation = useMutation({
+    mutationFn: (u: UserRow) => updateUser({ data: { id: u.id, is_active: !u.is_active } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["admin-users"] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const resetMutation = useMutation({
+    mutationFn: (u: UserRow) => resetUserPassword({ data: { id: u.id } }),
+    onSuccess: () => toast.success(t("people.users.tReset")),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
   const rows = useMemo(
     () =>
-      PEOPLE_USERS.filter((u) => {
+      allRows.filter((u) => {
         const hay = `${u.first_name} ${u.last_name} ${u.email} ${u.phone}`.toLowerCase();
         if (search && !hay.includes(search.toLowerCase())) return false;
         if (type !== "all" && u.type !== type) return false;
@@ -77,12 +168,12 @@ function UsersPage() {
         if (role !== "all" && !u.roles.includes(role)) return false;
         return true;
       }),
-    [search, type, active, registered, role],
+    [allRows, search, type, active, registered, role],
   );
 
-  const staff = PEOPLE_USERS.filter((u) => u.type === "STAFF").length;
-  const stores = PEOPLE_USERS.filter((u) => u.type === "STORE").length;
-  const activeCount = PEOPLE_USERS.filter((u) => u.is_active).length;
+  const staff = allRows.filter((u) => u.type === "STAFF").length;
+  const stores = allRows.filter((u) => u.type === "STORE").length;
+  const activeCount = allRows.filter((u) => u.is_active).length;
 
   function open(u: UserRow) {
     navigate({ to: "/users/$id", params: { id: u.id } });
@@ -215,7 +306,7 @@ function UsersPage() {
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             label={t("people.users.kpiTotal")}
-            value={PEOPLE_USERS.length}
+            value={allRows.length}
             icon={<Users className="h-5 w-5" />}
             accent
           />
@@ -306,9 +397,16 @@ function UsersPage() {
                   <Can perm="users.update">
                     <DropdownMenuItem
                       onClick={() =>
-                        toast.success(
-                          t(u.is_active ? "people.users.tDeactivated" : "people.users.tActivated"),
-                        )
+                        toggleActiveMutation.mutate(u, {
+                          onSuccess: () =>
+                            toast.success(
+                              t(
+                                u.is_active
+                                  ? "people.users.tDeactivated"
+                                  : "people.users.tActivated",
+                              ),
+                            ),
+                        })
                       }
                     >
                       <Power className="me-2 h-4 w-4" />{" "}
@@ -318,7 +416,7 @@ function UsersPage() {
                     </DropdownMenuItem>
                   </Can>
                   <Can perm="users.reset_password">
-                    <DropdownMenuItem onClick={() => toast.success(t("people.users.tReset"))}>
+                    <DropdownMenuItem onClick={() => resetMutation.mutate(u)}>
                       <KeyRound className="me-2 h-4 w-4" /> {t("people.users.actReset")}
                     </DropdownMenuItem>
                   </Can>

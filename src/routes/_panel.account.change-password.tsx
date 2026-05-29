@@ -11,6 +11,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n";
+import { parseServerError } from "@/lib/api/error";
+import { changePassword } from "@/lib/api/account.functions";
 
 export const Route = createFileRoute("/_panel/account/change-password")({
   head: () => ({ meta: [{ title: "Change password — Mixlebs Admin" }] }),
@@ -52,6 +54,7 @@ function ChangePasswordPage() {
     register,
     handleSubmit,
     watch,
+    setError,
     formState: { errors, isSubmitting },
   } = form;
 
@@ -67,9 +70,30 @@ function ChangePasswordPage() {
   const strengthColor =
     score <= 1 ? "text-destructive" : score <= 3 ? "text-warning" : "text-success";
 
-  function onSubmit(_values: Values) {
-    toast.success(t("account.cpSaved"));
-    form.reset();
+  async function onSubmit(values: Values) {
+    try {
+      await changePassword({
+        data: { current_password: values.current_password, password: values.new_password },
+      });
+      toast.success(t("account.cpSaved"));
+      form.reset();
+    } catch (err) {
+      const info = parseServerError(err);
+      const fe = info.fieldErrors;
+      if (fe?.current_password) {
+        setError("current_password", {
+          message: Array.isArray(fe.current_password)
+            ? fe.current_password[0]
+            : String(fe.current_password),
+        });
+      }
+      if (fe?.password) {
+        setError("new_password", {
+          message: Array.isArray(fe.password) ? fe.password[0] : String(fe.password),
+        });
+      }
+      toast.error(info.message);
+    }
   }
 
   const ruleRows: { key: keyof typeof rules; label: string }[] = [
