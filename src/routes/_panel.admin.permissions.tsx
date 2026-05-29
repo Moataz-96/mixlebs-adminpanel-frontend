@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, KeyRound, Layers, Pencil, Trash2, MoreHorizontal, X } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -36,10 +37,25 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import {
-  ADMIN_PERMISSIONS,
-  ADMIN_PERMISSION_RESOURCES,
-  type AdminPermission,
-} from "@/lib/mock/admin";
+  listPermissions,
+  listPermissionResources,
+  createPermission,
+  updatePermission,
+  deletePermission,
+} from "@/lib/api/rbac.functions";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
+
+// View-model the JSX expects (mock parity); the BE Permission exposes the link
+// arrays, which we surface as counts.
+interface AdminPermission {
+  id: string;
+  name: string;
+  description: string;
+  is_enabled: boolean;
+  resources: number;
+  role_policies: number;
+  user_policies: number;
+}
 
 export const Route = createFileRoute("/_panel/admin/permissions")({
   head: () => ({ meta: [{ title: "Permissions — Mixlebs Admin" }] }),
@@ -57,13 +73,69 @@ function PermissionsPage() {
   const t = useT();
   const { role } = usePermissions();
   const state = usePageState();
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<AdminPermission | null>(null);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [resources, setResources] = useState<string[]>([]);
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: { name: "", description: "", is_enabled: true },
+  });
+
+  const permissionsQuery = useQuery({
+    queryKey: ["rbac", "permissions"],
+    queryFn: () => listPermissions({ data: { page_size: 500 } }),
+  });
+  const resourcesQuery = useQuery({
+    queryKey: ["rbac", "permission-resources"],
+    queryFn: () => listPermissionResources({ data: { page_size: 500 } }),
+  });
+  const resourceOptions = resourcesQuery.data?.results ?? [];
+
+  function invalidate() {
+    void queryClient.invalidateQueries({ queryKey: ["rbac"] });
+  }
+
+  const saveMut = useMutation({
+    mutationFn: (values: Values) => {
+      const body = {
+        name: values.name,
+        description: values.description,
+        is_enabled: values.is_enabled,
+        resources: resources.map(Number),
+      };
+      return editingId
+        ? updatePermission({ data: { id: editingId, ...body } })
+        : createPermission({ data: body });
+    },
+    onSuccess: () => {
+      toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
+      invalidate();
+      setOpen(false);
+    },
+    onError: (err) => {
+      const info = parseServerError(err);
+      let mapped = false;
+      for (const f of ["name", "description", "is_enabled"] as const) {
+        const msg = fieldMessage(info.fieldErrors, f);
+        if (msg) {
+          form.setError(f, { message: msg });
+          mapped = true;
+        }
+      }
+      if (!mapped) toast.error(info.message);
+    },
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (id: number) => deletePermission({ data: { id } }),
+    onSuccess: () => {
+      toast.success(t("admin.common.deletedToast"));
+      invalidate();
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
   });
 
   if (role !== "admin") {
@@ -78,27 +150,48 @@ function PermissionsPage() {
     );
   }
 
-  const rows = ADMIN_PERMISSIONS;
+  const rows: AdminPermission[] = (permissionsQuery.data?.results ?? []).map((p) => ({
+    id: String(p.id),
+    name: p.name,
+    description: p.description ?? "",
+    is_enabled: p.is_enabled,
+    resources: (p.resources ?? []).length,
+    role_policies: (p.role_policies ?? []).length,
+    user_policies: (p.user_policies ?? []).length,
+  }));
+
+  const effState =
+    state !== "populated"
+      ? state
+      : permissionsQuery.isPending
+        ? "loading"
+        : permissionsQuery.isError
+          ? "error"
+          : rows.length === 0
+            ? "empty"
+            : "populated";
 
   function openNew() {
     setEditing(null);
+    setEditingId(null);
     form.reset({ name: "", description: "", is_enabled: true });
     setResources([]);
     setOpen(true);
   }
   function openEdit(r: AdminPermission) {
+    const pid = Number(r.id);
     setEditing(r);
+    setEditingId(pid);
     form.reset({ name: r.name, description: r.description, is_enabled: r.is_enabled });
-    setResources(ADMIN_PERMISSION_RESOURCES.slice(0, r.resources).map((x) => x.id));
+    const perm = (permissionsQuery.data?.results ?? []).find((p) => p.id === pid);
+    setResources((perm?.resources ?? []).map(String));
     setOpen(true);
   }
   function toggle(v: string) {
     setResources((s) => (s.includes(v) ? s.filter((x) => x !== v) : [...s, v]));
   }
   function onSubmit(values: Values) {
-    toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
-    setOpen(false);
-    void values;
+    saveMut.mutate(values);
   }
 
   const columns: Column<AdminPermission>[] = [
@@ -187,7 +280,7 @@ function PermissionsPage() {
       </div>
 
       <div className="mt-6">
-        <PageStates state={state} missingPerms={["permissions.view"]}>
+        <PageStates state={effState} missingPerms={["permissions.view"]}>
           <DataTable
             data={rows}
             columns={columns}
@@ -215,7 +308,7 @@ function PermissionsPage() {
                     title={t("admin.permissions.deleteTitle")}
                     confirmLabel={t("admin.common.delete")}
                     typeToConfirm={r.name}
-                    onConfirm={() => toast.success(t("admin.common.deletedToast"))}
+                    onConfirm={() => deleteMut.mutate(Number(r.id))}
                     trigger={
                       <DropdownMenuItem
                         onSelect={(e) => e.preventDefault()}
@@ -278,11 +371,11 @@ function PermissionsPage() {
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="max-h-72 w-72 overflow-y-auto">
-                      {ADMIN_PERMISSION_RESOURCES.map((o) => (
+                      {resourceOptions.map((o) => (
                         <DropdownMenuCheckboxItem
                           key={o.id}
-                          checked={resources.includes(o.id)}
-                          onCheckedChange={() => toggle(o.id)}
+                          checked={resources.includes(String(o.id))}
+                          onCheckedChange={() => toggle(String(o.id))}
                           onSelect={(e) => e.preventDefault()}
                         >
                           <span className="font-mono text-xs">{o.name}</span>
@@ -304,7 +397,7 @@ function PermissionsPage() {
                       variant="secondary"
                       className="gap-1.5 py-1 ps-2 pe-1 font-mono text-[11px]"
                     >
-                      {ADMIN_PERMISSION_RESOURCES.find((x) => x.id === v)?.name}
+                      {resourceOptions.find((x) => String(x.id) === v)?.name}
                       <button
                         type="button"
                         onClick={() => toggle(v)}

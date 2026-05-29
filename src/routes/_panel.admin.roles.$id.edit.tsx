@@ -1,8 +1,9 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Save, Users, ShieldCheck, KeyRound, X, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -23,8 +24,22 @@ import {
   DropdownMenuCheckboxItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ADMIN_ROLES, ADMIN_ROLE_POLICIES, ADMIN_PICK_USERS } from "@/lib/mock/admin";
-import { PERMISSIONS } from "@/lib/mock-data";
+import {
+  getRole,
+  updateRole,
+  listRolePolicies,
+  updateRolePolicy,
+  listPermissions,
+  listPermissionResources,
+  attachUserRole,
+  detachUserRole,
+} from "@/lib/api/rbac.functions";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
+
+// Members picker options need user display names/emails, which Phase 2 does not
+// expose (no admin users-list endpoint until Phase 7). Until then the picker is
+// seeded from the role's own member ids; see required_adminpanel_change.md.
+const MEMBER_OPTION_FALLBACK: { id: string; name: string; email: string }[] = [];
 
 export const Route = createFileRoute("/_panel/admin/roles/$id/edit")({
   head: () => ({ meta: [{ title: "Edit role — Mixlebs Admin" }] }),
@@ -43,21 +58,82 @@ function EditRolePage() {
   const { role } = usePermissions();
   const state = usePageState();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { id } = Route.useParams();
-  const data = ADMIN_ROLES.find((r) => r.id === id) ?? ADMIN_ROLES[0];
+  const roleId = Number(id);
 
-  const [members, setMembers] = useState<string[]>([
-    ADMIN_PICK_USERS[1].id,
-    ADMIN_PICK_USERS[2].id,
-  ]);
-  const [policies, setPolicies] = useState<string[]>([
-    ADMIN_ROLE_POLICIES[0].id,
-    ADMIN_ROLE_POLICIES[1].id,
-  ]);
+  const roleQuery = useQuery({
+    queryKey: ["rbac", "role", id],
+    queryFn: () => getRole({ data: { id: roleId } }),
+  });
+  const policiesQuery = useQuery({
+    queryKey: ["rbac", "role-policies"],
+    queryFn: () => listRolePolicies({ data: { page_size: 200 } }),
+  });
+  const permissionsQuery = useQuery({
+    queryKey: ["rbac", "permissions"],
+    queryFn: () => listPermissions({ data: { page_size: 500 } }),
+  });
+  const resourcesQuery = useQuery({
+    queryKey: ["rbac", "permission-resources"],
+    queryFn: () => listPermissionResources({ data: { page_size: 500 } }),
+  });
+
+  const data = roleQuery.data;
+
+  // Members are the role's user ids. The display picker lacks a user lookup in
+  // Phase 2 (see required_adminpanel_change.md); chips fall back to the raw id.
+  const [members, setMembers] = useState<string[]>([]);
+  const [policies, setPolicies] = useState<string[]>([]);
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
-    defaultValues: { name: data.name, description: data.description, is_enabled: data.is_enabled },
+    defaultValues: { name: "", description: "", is_enabled: true },
+  });
+
+  // Hydrate local form + pickers once the role + policies arrive.
+  const policyRows = policiesQuery.data?.results ?? [];
+  useEffect(() => {
+    if (!data) return;
+    form.reset({
+      name: data.name,
+      description: data.description ?? "",
+      is_enabled: data.is_enabled,
+    });
+    setMembers((data.users ?? []).map(String));
+    setPolicies(
+      policyRows.filter((p) => (p.roles ?? []).includes(roleId)).map((p) => String(p.id)),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, policiesQuery.data]);
+
+  const saveMut = useMutation({
+    mutationFn: (values: Values) =>
+      updateRole({
+        data: {
+          id: roleId,
+          name: values.name,
+          description: values.description,
+          is_enabled: values.is_enabled,
+          users: members,
+        },
+      }),
+    onSuccess: () => {
+      toast.success(t("admin.roleEdit.saved"));
+      void queryClient.invalidateQueries({ queryKey: ["rbac"] });
+    },
+    onError: (err) => {
+      const info = parseServerError(err);
+      let mapped = false;
+      for (const f of ["name", "description", "is_enabled"] as const) {
+        const msg = fieldMessage(info.fieldErrors, f);
+        if (msg) {
+          form.setError(f, { message: msg });
+          mapped = true;
+        }
+      }
+      if (!mapped) toast.error(info.message);
+    },
   });
 
   if (role !== "admin") {
@@ -69,18 +145,61 @@ function EditRolePage() {
     );
   }
 
-  function toggle(list: string[], setList: (v: string[]) => void, value: string) {
-    setList(list.includes(value) ? list.filter((x) => x !== value) : [...list, value]);
+  function toggleMember(userId: string) {
+    const attached = members.includes(userId);
+    const fn = attached ? detachUserRole : attachUserRole;
+    setMembers(attached ? members.filter((m) => m !== userId) : [...members, userId]);
+    fn({ data: { user_id: userId, role_id: roleId } })
+      .then(() => queryClient.invalidateQueries({ queryKey: ["rbac", "role", id] }))
+      .catch((err) => toast.error(parseServerError(err).message));
+  }
+
+  // Attaching/detaching a role-policy edits that policy's roles[] (the link
+  // lives on RolePolicy, not Role).
+  function togglePolicy(policyId: string) {
+    const pid = Number(policyId);
+    const policy = policyRows.find((p) => p.id === pid);
+    if (!policy) return;
+    const attached = policies.includes(policyId);
+    const nextRoles = attached
+      ? (policy.roles ?? []).filter((r) => r !== roleId)
+      : [...(policy.roles ?? []), roleId];
+    setPolicies(attached ? policies.filter((p) => p !== policyId) : [...policies, policyId]);
+    updateRolePolicy({ data: { id: pid, roles: nextRoles } })
+      .then(() => queryClient.invalidateQueries({ queryKey: ["rbac", "role-policies"] }))
+      .catch((err) => toast.error(parseServerError(err).message));
   }
 
   function onSubmit(values: Values) {
-    toast.success(t("admin.roleEdit.saved"));
-    void values;
+    saveMut.mutate(values);
   }
 
-  // Effective permission set derived from selected policies (demo: deterministic slice).
-  const effective = PERMISSIONS.filter((_, i) =>
-    policies.length === 0 ? false : i % Math.max(2, 4 - policies.length) === 0,
+  const effState =
+    state !== "populated"
+      ? state
+      : roleQuery.isPending
+        ? "loading"
+        : roleQuery.isError
+          ? "notfound"
+          : "populated";
+
+  // Effective permission set: resources reachable from the role's selected
+  // role-policies. permission.role_policies[] links a permission to policies;
+  // permission.resources[] links it to permission-resources whose `name` is the
+  // canonical "resource.action" string.
+  const selectedPolicyIds = policies.map(Number);
+  const resourceById = new Map((resourcesQuery.data?.results ?? []).map((r) => [r.id, r.name]));
+  const effective = Array.from(
+    new Set(
+      (permissionsQuery.data?.results ?? [])
+        .filter(
+          (p) =>
+            p.is_enabled !== false &&
+            (p.role_policies ?? []).some((rp) => selectedPolicyIds.includes(rp)),
+        )
+        .flatMap((p) => (p.resources ?? []).map((rid) => resourceById.get(rid)))
+        .filter((name): name is string => !!name),
+    ),
   );
   const grouped = effective.reduce<Record<string, string[]>>((acc, p) => {
     const [app, ...rest] = p.split(".");
@@ -92,7 +211,7 @@ function EditRolePage() {
     <div className="p-6">
       <PageHeader
         title={t("admin.roleEdit.title")}
-        description={data.name}
+        description={data?.name ?? ""}
         actions={
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={() => navigate({ to: "/admin/roles" })}>
@@ -109,7 +228,7 @@ function EditRolePage() {
         }
       />
 
-      <PageStates state={state} missingPerms={["roles.update"]}>
+      <PageStates state={effState} missingPerms={["roles.update"]}>
         <form id="role-form" onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
           <Card className="border-0 p-6 shadow-soft">
             <h3 className="mb-4 font-display text-lg font-semibold">
@@ -152,12 +271,12 @@ function EditRolePage() {
               </div>
               <MultiPicker
                 label={t("admin.roleEdit.addMember")}
-                options={ADMIN_PICK_USERS.map((u) => ({
-                  value: u.id,
-                  label: `${u.name} · ${u.email}`,
-                }))}
+                options={members.map((mId) => {
+                  const u = MEMBER_OPTION_FALLBACK.find((x) => x.id === mId);
+                  return { value: mId, label: u ? `${u.name} · ${u.email}` : mId };
+                })}
                 selected={members}
-                onToggle={(v) => toggle(members, setMembers, v)}
+                onToggle={toggleMember}
               />
             </div>
             <p className="mb-3 text-sm text-muted-foreground">{t("admin.roleEdit.membersHint")}</p>
@@ -166,14 +285,13 @@ function EditRolePage() {
                 <span className="text-sm text-muted-foreground">{t("admin.common.none")}</span>
               )}
               {members.map((mId) => {
-                const u = ADMIN_PICK_USERS.find((x) => x.id === mId);
-                if (!u) return null;
+                const u = MEMBER_OPTION_FALLBACK.find((x) => x.id === mId);
                 return (
                   <Badge key={mId} variant="secondary" className="gap-1.5 py-1.5 ps-2.5 pe-1.5">
-                    {u.name}
+                    {u ? u.name : mId}
                     <button
                       type="button"
-                      onClick={() => toggle(members, setMembers, mId)}
+                      onClick={() => toggleMember(mId)}
                       aria-label="Remove"
                       className="rounded-full p-0.5 hover:bg-background/60"
                     >
@@ -196,9 +314,9 @@ function EditRolePage() {
               </div>
               <MultiPicker
                 label={t("admin.roleEdit.addPolicy")}
-                options={ADMIN_ROLE_POLICIES.map((p) => ({ value: p.id, label: p.name }))}
+                options={policyRows.map((p) => ({ value: String(p.id), label: p.name }))}
                 selected={policies}
-                onToggle={(v) => toggle(policies, setPolicies, v)}
+                onToggle={togglePolicy}
               />
             </div>
             <p className="mb-3 text-sm text-muted-foreground">
@@ -209,14 +327,14 @@ function EditRolePage() {
                 <span className="text-sm text-muted-foreground">{t("admin.common.none")}</span>
               )}
               {policies.map((pId) => {
-                const p = ADMIN_ROLE_POLICIES.find((x) => x.id === pId);
+                const p = policyRows.find((x) => String(x.id) === pId);
                 if (!p) return null;
                 return (
                   <Badge key={pId} variant="secondary" className="gap-1.5 py-1.5 ps-2.5 pe-1.5">
                     {p.name}
                     <button
                       type="button"
-                      onClick={() => toggle(policies, setPolicies, pId)}
+                      onClick={() => togglePolicy(pId)}
                       aria-label="Remove"
                       className="rounded-full p-0.5 hover:bg-background/60"
                     >

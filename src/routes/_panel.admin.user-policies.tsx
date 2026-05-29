@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, UserCog, ShieldX, Pencil, Trash2, MoreHorizontal, X } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -37,11 +38,35 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import {
-  ADMIN_USER_POLICIES,
-  ADMIN_PERMISSIONS,
-  ADMIN_PICK_USERS,
-  type AdminUserPolicy,
-} from "@/lib/mock/admin";
+  listUserPolicies,
+  listPermissions,
+  createUserPolicy,
+  updateUserPolicy,
+  deleteUserPolicy,
+  updatePermission,
+} from "@/lib/api/rbac.functions";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
+
+// BE UserPolicy.type is integer: POSITIVE=1, NEGATIVE=0. The form uses the
+// string enum the FROZEN JSX expects; map at the wire boundary.
+const POSITIVE = 1;
+const NEGATIVE = 0;
+
+// View-model the JSX expects (mock parity). users = linked user ids count;
+// permissions = count of permissions whose user_policies[] reference this policy.
+interface AdminUserPolicy {
+  id: string;
+  name: string;
+  description: string;
+  type: "POSITIVE" | "NEGATIVE";
+  is_enabled: boolean;
+  users: number;
+  permissions: number;
+}
+
+// No admin users-list endpoint in Phase 2 — the users picker is seeded from the
+// policy's own member ids; see required_adminpanel_change.md.
+const USER_OPTION_FALLBACK: { id: string; name: string; email: string }[] = [];
 
 export const Route = createFileRoute("/_panel/admin/user-policies")({
   head: () => ({ meta: [{ title: "User policies — Mixlebs Admin" }] }),
@@ -60,8 +85,10 @@ function UserPoliciesPage() {
   const t = useT();
   const { role } = usePermissions();
   const state = usePageState();
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<AdminUserPolicy | null>(null);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [users, setUsers] = useState<string[]>([]);
   const [perms, setPerms] = useState<string[]>([]);
 
@@ -70,6 +97,79 @@ function UserPoliciesPage() {
     defaultValues: { name: "", description: "", type: "POSITIVE", is_enabled: true },
   });
   const typeVal = form.watch("type");
+
+  const policiesQuery = useQuery({
+    queryKey: ["rbac", "user-policies"],
+    queryFn: () => listUserPolicies({ data: { page_size: 200 } }),
+  });
+  const permissionsQuery = useQuery({
+    queryKey: ["rbac", "permissions"],
+    queryFn: () => listPermissions({ data: { page_size: 500 } }),
+  });
+  const permissionOptions = permissionsQuery.data?.results ?? [];
+
+  function invalidate() {
+    void queryClient.invalidateQueries({ queryKey: ["rbac"] });
+  }
+
+  // Permission ↔ user-policy link lives on Permission.user_policies[].
+  async function syncPermissionLinks(policyId: number, selectedPermIds: number[]) {
+    const all = permissionsQuery.data?.results ?? [];
+    await Promise.all(
+      all.map((p) => {
+        const linked = (p.user_policies ?? []).includes(policyId);
+        const want = selectedPermIds.includes(p.id);
+        if (linked === want) return Promise.resolve(undefined);
+        const next = want
+          ? [...(p.user_policies ?? []), policyId]
+          : (p.user_policies ?? []).filter((x) => x !== policyId);
+        return updatePermission({ data: { id: p.id, user_policies: next } });
+      }),
+    );
+  }
+
+  const saveMut = useMutation({
+    mutationFn: async (values: Values) => {
+      const body = {
+        name: values.name,
+        description: values.description,
+        type: (values.type === "POSITIVE" ? POSITIVE : NEGATIVE) as 0 | 1,
+        is_enabled: values.is_enabled,
+        users,
+      };
+      const saved = editingId
+        ? await updateUserPolicy({ data: { id: editingId, ...body } })
+        : await createUserPolicy({ data: body });
+      await syncPermissionLinks(saved.id, perms.map(Number));
+      return saved;
+    },
+    onSuccess: () => {
+      toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
+      invalidate();
+      setOpen(false);
+    },
+    onError: (err) => {
+      const info = parseServerError(err);
+      let mapped = false;
+      for (const f of ["name", "description", "is_enabled"] as const) {
+        const msg = fieldMessage(info.fieldErrors, f);
+        if (msg) {
+          form.setError(f, { message: msg });
+          mapped = true;
+        }
+      }
+      if (!mapped) toast.error(info.message);
+    },
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (id: number) => deleteUserPolicy({ data: { id } }),
+    onSuccess: () => {
+      toast.success(t("admin.common.deletedToast"));
+      invalidate();
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
 
   if (role !== "admin") {
     return (
@@ -83,34 +183,62 @@ function UserPoliciesPage() {
     );
   }
 
-  const rows = ADMIN_USER_POLICIES;
+  const permCountFor = (policyId: number) =>
+    permissionOptions.filter((p) => (p.user_policies ?? []).includes(policyId)).length;
+
+  const rows: AdminUserPolicy[] = (policiesQuery.data?.results ?? []).map((p) => ({
+    id: String(p.id),
+    name: p.name,
+    description: p.description ?? "",
+    type: p.type === POSITIVE ? "POSITIVE" : "NEGATIVE",
+    is_enabled: p.is_enabled,
+    users: (p.users ?? []).length,
+    permissions: permCountFor(p.id),
+  }));
+
+  const effState =
+    state !== "populated"
+      ? state
+      : policiesQuery.isPending
+        ? "loading"
+        : policiesQuery.isError
+          ? "error"
+          : rows.length === 0
+            ? "empty"
+            : "populated";
 
   function openNew() {
     setEditing(null);
+    setEditingId(null);
     form.reset({ name: "", description: "", type: "POSITIVE", is_enabled: true });
     setUsers([]);
     setPerms([]);
     setOpen(true);
   }
   function openEdit(r: AdminUserPolicy) {
+    const pid = Number(r.id);
     setEditing(r);
+    setEditingId(pid);
     form.reset({
       name: r.name,
       description: r.description,
       type: r.type,
       is_enabled: r.is_enabled,
     });
-    setUsers(ADMIN_PICK_USERS.slice(0, r.users).map((u) => u.id));
-    setPerms(ADMIN_PERMISSIONS.slice(0, r.permissions).map((p) => p.id));
+    const policy = (policiesQuery.data?.results ?? []).find((p) => p.id === pid);
+    setUsers((policy?.users ?? []).map(String));
+    setPerms(
+      permissionOptions
+        .filter((p) => (p.user_policies ?? []).includes(pid))
+        .map((p) => String(p.id)),
+    );
     setOpen(true);
   }
   function toggle(list: string[], setList: (v: string[]) => void, v: string) {
     setList(list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
   }
   function onSubmit(values: Values) {
-    toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
-    setOpen(false);
-    void values;
+    saveMut.mutate(values);
   }
 
   const columns: Column<AdminUserPolicy>[] = [
@@ -211,7 +339,7 @@ function UserPoliciesPage() {
       </div>
 
       <div className="mt-6">
-        <PageStates state={state} missingPerms={["user_policies.view"]}>
+        <PageStates state={effState} missingPerms={["user_policies.view"]}>
           <DataTable
             data={rows}
             columns={columns}
@@ -239,7 +367,7 @@ function UserPoliciesPage() {
                     title={t("admin.userPolicies.deleteTitle")}
                     confirmLabel={t("admin.common.delete")}
                     typeToConfirm={r.name}
-                    onConfirm={() => toast.success(t("admin.common.deletedToast"))}
+                    onConfirm={() => deleteMut.mutate(Number(r.id))}
                     trigger={
                       <DropdownMenuItem
                         onSelect={(e) => e.preventDefault()}
@@ -312,21 +440,21 @@ function UserPoliciesPage() {
               <PickerField
                 title={t("admin.userPolicies.users")}
                 hint={t("admin.userPolicies.usersHint")}
-                options={ADMIN_PICK_USERS.map((u) => ({
-                  value: u.id,
-                  label: `${u.name} · ${u.email}`,
-                }))}
+                options={users.map((uId) => {
+                  const u = USER_OPTION_FALLBACK.find((x) => x.id === uId);
+                  return { value: uId, label: u ? `${u.name} · ${u.email}` : uId };
+                })}
                 selected={users}
                 onToggle={(v) => toggle(users, setUsers, v)}
-                renderChip={(v) => ADMIN_PICK_USERS.find((u) => u.id === v)?.name}
+                renderChip={(v) => USER_OPTION_FALLBACK.find((u) => u.id === v)?.name ?? v}
               />
               <PickerField
                 title={t("admin.userPolicies.permissions")}
                 hint={t("admin.userPolicies.permissionsHint")}
-                options={ADMIN_PERMISSIONS.map((p) => ({ value: p.id, label: p.name }))}
+                options={permissionOptions.map((p) => ({ value: String(p.id), label: p.name }))}
                 selected={perms}
                 onToggle={(v) => toggle(perms, setPerms, v)}
-                renderChip={(v) => ADMIN_PERMISSIONS.find((p) => p.id === v)?.name}
+                renderChip={(v) => permissionOptions.find((p) => String(p.id) === v)?.name}
               />
             </div>
             <SheetFooter>

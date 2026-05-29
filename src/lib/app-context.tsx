@@ -46,6 +46,14 @@ export const DEMO_STORES: Store[] = [
   { id: "str_05", name: "Zahle Olive Press", logo: "ZO", status: "Unverified" },
 ];
 
+// CustomUser.type → panel Role. STAFF and ADMIN both map to the platform-staff
+// surface; STORE is the seller surface. CUSTOMER never reaches the panel.
+function roleFromUserType(type: unknown): Role {
+  if (type === "STORE") return "store";
+  if (type === "STAFF") return "staff";
+  return "admin";
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [role, setRole] = useState<Role>("admin");
   const [theme, setThemeState] = useState<Theme>("dark");
@@ -66,16 +74,33 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const isAuthed = !!meQuery.data && !meQuery.isError;
   const authLoading = meQuery.isPending;
 
+  // Live effective permission set + superuser flag from /auth/me. These are the
+  // single source of truth for can()/usePermissions() — see plan §6.2. The role
+  // is derived from the authenticated user's type so the existing role-based
+  // guards keep working with zero JSX changes.
+  const permissions = useMemo(() => meQuery.data?.permissions ?? [], [meQuery.data]);
+  const isSuperuser = meQuery.data?.user?.is_superuser === true;
+
+  useEffect(() => {
+    // Push the live permission set into the module-scoped holder the exported
+    // can() reads, so <Can> / usePermissions() resolve against /auth/me.
+    setPermissionContext(permissions, isSuperuser);
+  }, [permissions, isSuperuser]);
+
+  useEffect(() => {
+    if (meQuery.data?.user?.type) {
+      setRole(roleFromUserType(meQuery.data.user.type));
+    }
+  }, [meQuery.data]);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const t =
       (localStorage.getItem("mx.theme") as Theme) ||
       (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     const l = (localStorage.getItem("mx.locale") as Locale) || "en";
-    const r = (localStorage.getItem("mx.role") as Role) || "admin";
     setThemeState(t);
     setLocaleState(l);
-    setRole(r);
   }, []);
 
   // The login/register server fn has already set the auth cookies; refetch /me.
@@ -99,7 +124,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (typeof window !== "undefined") {
       localStorage.setItem("mx.theme", theme);
       localStorage.setItem("mx.locale", locale);
-      localStorage.setItem("mx.role", role);
     }
   }, [theme, locale, role]);
 
@@ -131,54 +155,32 @@ export function useApp() {
   return ctx;
 }
 
-// Permission helpers — see spec section 2.
-const STORE_DENIED = new Set([
-  "categories.update",
-  "properties.update",
-  "collections.create_platform",
-  "coupons.create_platform",
-  "couriers.update",
-  "stores.review_identity",
-  "stores.transition_status",
-  "users.reset_password",
-  "users.create_staff",
-  "users.assign_role",
-  "users.assign_user_policy",
-  "customers.view",
-  "customers.block_returns",
-  "search_history.view",
-  "locations.update",
-  "roles.view",
-  "role_policies.view",
-  "user_policies.view",
-  "permissions.view",
-  "permission_resources.view",
-  "resources.update",
-  "notifications.send",
-  "notifications.send_broadcast",
-  "templates.view",
-  "chat.support_inbox_view",
-  "audit_log.view",
-  "feedback.view",
-  "wallet.view_any",
-  "dashboard.view_all_stores",
-]);
+// ---------------------------------------------------------------------------
+// Permission source of truth — the live effective set from GET /auth/me.
+//
+// AppProvider pushes me.permissions + me.user.is_superuser into this holder via
+// setPermissionContext(); the exported can() (consumed by <Can> /
+// usePermissions() in components/shared/Can.tsx, unchanged) reads it. A perm is
+// granted iff its "resource.action" string is in the live set, with superusers
+// bypassing to true. The old static STORE_DENIED / STAFF_DENIED denial lists
+// are gone — gating now mirrors the server `HasResourceActionPermission` rule.
+// ---------------------------------------------------------------------------
 
-const STAFF_DENIED = new Set([
-  "users.assign_role",
-  "users.assign_user_policy",
-  "roles.view",
-  "role_policies.view",
-  "user_policies.view",
-  "permissions.view",
-  "permission_resources.view",
-  "templates.view",
-  "notifications.send_broadcast",
-]);
+let permissionSet = new Set<string>();
+let superuser = false;
 
-export function can(role: Role, perm: string): boolean {
-  if (role === "admin") return true;
-  if (role === "store") return !STORE_DENIED.has(perm);
-  if (role === "staff") return !STAFF_DENIED.has(perm);
-  return false;
+function setPermissionContext(perms: string[], isSuperuser: boolean) {
+  permissionSet = new Set(perms);
+  superuser = isSuperuser;
+}
+
+/**
+ * True iff `perm` ("resource.action") is in the effective set from /auth/me.
+ * Superusers bypass to true. `role` is accepted for signature compatibility
+ * with the existing <Can> / usePermissions() callers but is not consulted —
+ * the flat permission set is authoritative.
+ */
+export function can(_role: Role, perm: string): boolean {
+  if (superuser) return true;
+  return permissionSet.has(perm);
 }

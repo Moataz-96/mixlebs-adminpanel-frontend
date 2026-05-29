@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, ShieldCheck, KeyRound, Pencil, Trash2, MoreHorizontal, X } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -36,11 +37,26 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import {
-  ADMIN_ROLE_POLICIES,
-  ADMIN_ROLES,
-  ADMIN_PERMISSIONS,
-  type AdminRolePolicy,
-} from "@/lib/mock/admin";
+  listRolePolicies,
+  listRoles,
+  listPermissions,
+  createRolePolicy,
+  updateRolePolicy,
+  deleteRolePolicy,
+  updatePermission,
+} from "@/lib/api/rbac.functions";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
+
+// View-model the JSX expects (mock parity). roles = count of linked roles;
+// permissions = count of permissions whose role_policies[] reference this policy.
+interface AdminRolePolicy {
+  id: string;
+  name: string;
+  description: string;
+  is_enabled: boolean;
+  roles: number;
+  permissions: number;
+}
 
 export const Route = createFileRoute("/_panel/admin/role-policies")({
   head: () => ({ meta: [{ title: "Role policies — Mixlebs Admin" }] }),
@@ -58,14 +74,95 @@ function RolePoliciesPage() {
   const t = useT();
   const { role } = usePermissions();
   const state = usePageState();
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<AdminRolePolicy | null>(null);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [perms, setPerms] = useState<string[]>([]);
   const [roles, setRoles] = useState<string[]>([]);
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: { name: "", description: "", is_enabled: true },
+  });
+
+  const policiesQuery = useQuery({
+    queryKey: ["rbac", "role-policies"],
+    queryFn: () => listRolePolicies({ data: { page_size: 200 } }),
+  });
+  const rolesQuery = useQuery({
+    queryKey: ["rbac", "roles"],
+    queryFn: () => listRoles({ data: { page_size: 200 } }),
+  });
+  const permissionsQuery = useQuery({
+    queryKey: ["rbac", "permissions"],
+    queryFn: () => listPermissions({ data: { page_size: 500 } }),
+  });
+
+  const roleOptions = rolesQuery.data?.results ?? [];
+  const permissionOptions = permissionsQuery.data?.results ?? [];
+
+  function invalidate() {
+    void queryClient.invalidateQueries({ queryKey: ["rbac"] });
+  }
+
+  // Permissions ↔ role-policy link lives on Permission.role_policies[]. After a
+  // policy save we reconcile the selected permissions to point at this policy.
+  async function syncPermissionLinks(policyId: number, selectedPermIds: number[]) {
+    const all = permissionsQuery.data?.results ?? [];
+    await Promise.all(
+      all.map((p) => {
+        const linked = (p.role_policies ?? []).includes(policyId);
+        const want = selectedPermIds.includes(p.id);
+        if (linked === want) return Promise.resolve(undefined);
+        const next = want
+          ? [...(p.role_policies ?? []), policyId]
+          : (p.role_policies ?? []).filter((x) => x !== policyId);
+        return updatePermission({ data: { id: p.id, role_policies: next } });
+      }),
+    );
+  }
+
+  const saveMut = useMutation({
+    mutationFn: async (values: Values) => {
+      const body = {
+        name: values.name,
+        description: values.description,
+        is_enabled: values.is_enabled,
+        roles: roles.map(Number),
+      };
+      const saved = editingId
+        ? await updateRolePolicy({ data: { id: editingId, ...body } })
+        : await createRolePolicy({ data: body });
+      await syncPermissionLinks(saved.id, perms.map(Number));
+      return saved;
+    },
+    onSuccess: () => {
+      toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
+      invalidate();
+      setOpen(false);
+    },
+    onError: (err) => {
+      const info = parseServerError(err);
+      let mapped = false;
+      for (const f of ["name", "description", "is_enabled"] as const) {
+        const msg = fieldMessage(info.fieldErrors, f);
+        if (msg) {
+          form.setError(f, { message: msg });
+          mapped = true;
+        }
+      }
+      if (!mapped) toast.error(info.message);
+    },
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (id: number) => deleteRolePolicy({ data: { id } }),
+    onSuccess: () => {
+      toast.success(t("admin.common.deletedToast"));
+      invalidate();
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
   });
 
   if (role !== "admin") {
@@ -80,29 +177,56 @@ function RolePoliciesPage() {
     );
   }
 
-  const rows = ADMIN_ROLE_POLICIES;
+  const permCountFor = (policyId: number) =>
+    permissionOptions.filter((p) => (p.role_policies ?? []).includes(policyId)).length;
+
+  const rows: AdminRolePolicy[] = (policiesQuery.data?.results ?? []).map((p) => ({
+    id: String(p.id),
+    name: p.name,
+    description: p.description ?? "",
+    is_enabled: p.is_enabled,
+    roles: (p.roles ?? []).length,
+    permissions: permCountFor(p.id),
+  }));
+
+  const effState =
+    state !== "populated"
+      ? state
+      : policiesQuery.isPending
+        ? "loading"
+        : policiesQuery.isError
+          ? "error"
+          : rows.length === 0
+            ? "empty"
+            : "populated";
 
   function openNew() {
     setEditing(null);
+    setEditingId(null);
     form.reset({ name: "", description: "", is_enabled: true });
     setPerms([]);
     setRoles([]);
     setOpen(true);
   }
   function openEdit(r: AdminRolePolicy) {
+    const pid = Number(r.id);
     setEditing(r);
+    setEditingId(pid);
     form.reset({ name: r.name, description: r.description, is_enabled: r.is_enabled });
-    setPerms(ADMIN_PERMISSIONS.slice(0, r.permissions).map((p) => p.id));
-    setRoles(ADMIN_ROLES.slice(0, r.roles).map((x) => x.id));
+    setPerms(
+      permissionOptions
+        .filter((p) => (p.role_policies ?? []).includes(pid))
+        .map((p) => String(p.id)),
+    );
+    const policy = (policiesQuery.data?.results ?? []).find((p) => p.id === pid);
+    setRoles((policy?.roles ?? []).map(String));
     setOpen(true);
   }
   function toggle(list: string[], setList: (v: string[]) => void, v: string) {
     setList(list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
   }
   function onSubmit(values: Values) {
-    toast.success(editing ? t("admin.common.savedToast") : t("admin.common.createdToast"));
-    setOpen(false);
-    void values;
+    saveMut.mutate(values);
   }
 
   const columns: Column<AdminRolePolicy>[] = [
@@ -184,7 +308,7 @@ function RolePoliciesPage() {
       </div>
 
       <div className="mt-6">
-        <PageStates state={state} missingPerms={["role_policies.view"]}>
+        <PageStates state={effState} missingPerms={["role_policies.view"]}>
           <DataTable
             data={rows}
             columns={columns}
@@ -212,7 +336,7 @@ function RolePoliciesPage() {
                     title={t("admin.rolePolicies.deleteTitle")}
                     confirmLabel={t("admin.common.delete")}
                     typeToConfirm={r.name}
-                    onConfirm={() => toast.success(t("admin.common.deletedToast"))}
+                    onConfirm={() => deleteMut.mutate(Number(r.id))}
                     trigger={
                       <DropdownMenuItem
                         onSelect={(e) => e.preventDefault()}
@@ -268,18 +392,18 @@ function RolePoliciesPage() {
               <PickerField
                 title={t("admin.rolePolicies.permissions")}
                 hint={t("admin.rolePolicies.permissionsHint")}
-                options={ADMIN_PERMISSIONS.map((p) => ({ value: p.id, label: p.name }))}
+                options={permissionOptions.map((p) => ({ value: String(p.id), label: p.name }))}
                 selected={perms}
                 onToggle={(v) => toggle(perms, setPerms, v)}
-                renderChip={(v) => ADMIN_PERMISSIONS.find((p) => p.id === v)?.name}
+                renderChip={(v) => permissionOptions.find((p) => String(p.id) === v)?.name}
               />
               <PickerField
                 title={t("admin.rolePolicies.roles")}
                 hint={t("admin.rolePolicies.rolesHint")}
-                options={ADMIN_ROLES.map((r) => ({ value: r.id, label: r.name }))}
+                options={roleOptions.map((r) => ({ value: String(r.id), label: r.name }))}
                 selected={roles}
                 onToggle={(v) => toggle(roles, setRoles, v)}
-                renderChip={(v) => ADMIN_ROLES.find((r) => r.id === v)?.name}
+                renderChip={(v) => roleOptions.find((r) => String(r.id) === v)?.name}
               />
             </div>
             <SheetFooter>

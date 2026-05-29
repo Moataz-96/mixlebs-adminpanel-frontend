@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, ShieldCheck, Users, Pencil, Copy, Ban, Trash2, MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -34,7 +35,27 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { ADMIN_ROLES, type AdminRole } from "@/lib/mock/admin";
+import {
+  listRoles,
+  listRolePolicies,
+  createRole,
+  updateRole,
+  deleteRole,
+  type Role as ApiRole,
+} from "@/lib/api/rbac.functions";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
+
+// View-model the JSX expects (mock parity): the BE Role exposes users[] and
+// timestamps; policies-per-role is derived from the role-policies collection.
+interface AdminRole {
+  id: string;
+  name: string;
+  description: string;
+  is_enabled: boolean;
+  users: number;
+  policies: number;
+  created_at: string;
+}
 
 export const Route = createFileRoute("/_panel/admin/roles")({
   head: () => ({ meta: [{ title: "Roles — Mixlebs Admin" }] }),
@@ -53,12 +74,63 @@ function RolesPage() {
   const { role } = usePermissions();
   const state = usePageState();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: { name: "", description: "", is_enabled: true },
   });
+
+  const rolesQuery = useQuery({
+    queryKey: ["rbac", "roles"],
+    queryFn: () => listRoles({ data: { page_size: 200 } }),
+  });
+  const policiesQuery = useQuery({
+    queryKey: ["rbac", "role-policies"],
+    queryFn: () => listRolePolicies({ data: { page_size: 200 } }),
+  });
+
+  const createMut = useMutation({
+    mutationFn: (values: Values) => createRole({ data: values }),
+    onSuccess: () => {
+      toast.success(t("admin.common.createdToast"));
+      void queryClient.invalidateQueries({ queryKey: ["rbac", "roles"] });
+      setOpen(false);
+      form.reset();
+    },
+    onError: (err) => applyServerError(err),
+  });
+  const updateMut = useMutation({
+    mutationFn: (vars: { id: number; is_enabled: boolean }) =>
+      updateRole({ data: { id: vars.id, is_enabled: vars.is_enabled } }),
+    onSuccess: () => {
+      toast.success(t("admin.common.disabledToast"));
+      void queryClient.invalidateQueries({ queryKey: ["rbac", "roles"] });
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const deleteMut = useMutation({
+    mutationFn: (id: number) => deleteRole({ data: { id } }),
+    onSuccess: () => {
+      toast.success(t("admin.common.deletedToast"));
+      void queryClient.invalidateQueries({ queryKey: ["rbac", "roles"] });
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  function applyServerError(err: unknown) {
+    const info = parseServerError(err);
+    let mapped = false;
+    for (const f of ["name", "description", "is_enabled"] as const) {
+      const msg = fieldMessage(info.fieldErrors, f);
+      if (msg) {
+        form.setError(f, { message: msg });
+        mapped = true;
+      }
+    }
+    if (!mapped) toast.error(info.message);
+  }
 
   if (role !== "admin") {
     return (
@@ -69,14 +141,35 @@ function RolesPage() {
     );
   }
 
-  const rows = ADMIN_ROLES;
+  // Policies-per-role: count role-policies whose roles[] includes this role id.
+  const policyRows = policiesQuery.data?.results ?? [];
+  const policyCount = (roleId: number) =>
+    policyRows.filter((p) => (p.roles ?? []).includes(roleId)).length;
+
+  const rows: AdminRole[] = (rolesQuery.data?.results ?? []).map((r: ApiRole) => ({
+    id: String(r.id),
+    name: r.name,
+    description: r.description ?? "",
+    is_enabled: r.is_enabled,
+    users: (r.users ?? []).length,
+    policies: policyCount(r.id),
+    created_at: (r.created_at ?? "").slice(0, 10),
+  }));
   const fmt = (n: number) => n.toLocaleString();
 
+  const effState =
+    state !== "populated"
+      ? state
+      : rolesQuery.isPending
+        ? "loading"
+        : rolesQuery.isError
+          ? "error"
+          : rows.length === 0
+            ? "empty"
+            : "populated";
+
   function onCreate(values: Values) {
-    toast.success(t("admin.common.createdToast"));
-    setOpen(false);
-    form.reset();
-    void values;
+    createMut.mutate(values);
   }
 
   const columns: Column<AdminRole>[] = [
@@ -164,7 +257,7 @@ function RolesPage() {
       </div>
 
       <div className="mt-6">
-        <PageStates state={state} missingPerms={["roles.view"]}>
+        <PageStates state={effState} missingPerms={["roles.view"]}>
           <DataTable
             data={rows}
             columns={columns}
@@ -193,7 +286,11 @@ function RolesPage() {
                   >
                     <Copy className="me-2 h-4 w-4" /> {t("admin.common.duplicate")}
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => toast.success(t("admin.common.disabledToast"))}>
+                  <DropdownMenuItem
+                    onClick={() =>
+                      updateMut.mutate({ id: Number(r.id), is_enabled: !r.is_enabled })
+                    }
+                  >
                     <Ban className="me-2 h-4 w-4" /> {t("admin.common.disable")}
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
@@ -203,7 +300,7 @@ function RolesPage() {
                     description={t("admin.roles.deleteDesc")}
                     confirmLabel={t("admin.common.delete")}
                     typeToConfirm={r.name}
-                    onConfirm={() => toast.success(t("admin.common.deletedToast"))}
+                    onConfirm={() => deleteMut.mutate(Number(r.id))}
                     trigger={
                       <DropdownMenuItem
                         onSelect={(e) => e.preventDefault()}
