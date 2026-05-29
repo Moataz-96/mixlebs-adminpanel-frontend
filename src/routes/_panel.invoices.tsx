@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { FileText, Download, Eye, Mail } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -17,25 +18,59 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { INVOICES } from "@/lib/mock-data";
-import type { InvoiceType } from "@/lib/mock/sales";
 import { useApp } from "@/lib/app-context";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
+import { parseServerError } from "@/lib/api/error";
+import { downloadBase64 } from "@/lib/download";
+import {
+  listInvoices,
+  downloadInvoice,
+  type InvoiceListItem,
+} from "@/lib/api/invoices.functions";
+
+type InvoiceType = "ORDER" | "RETURN";
+
+function num(s: string | number | null | undefined): number {
+  const n = typeof s === "number" ? s : parseFloat(String(s ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
 
 export const Route = createFileRoute("/_panel/invoices")({
   head: () => ({ meta: [{ title: "Invoices — Mixlebs Admin" }] }),
   component: InvoicesPage,
 });
 
-type InvoiceRow = (typeof INVOICES)[number] & { type: InvoiceType };
+interface InvoiceRow {
+  id: string;
+  order: string;
+  customer: string;
+  amount: number;
+  issued: string;
+  status: string;
+  type: InvoiceType;
+}
 
 function InvoicesPage() {
   const t = useT();
   const navigate = useNavigate();
-  const state = usePageState();
-  const { role, stores } = useApp();
+  const previewState = usePageState();
+  const { role, stores, currentStoreId } = useApp();
   const showStore = role !== "store";
+
+  const invoicesQuery = useQuery({
+    queryKey: ["invoices", currentStoreId],
+    queryFn: () => listInvoices({ data: { store_id: currentStoreId, page_size: 200 } }),
+    staleTime: 30 * 1000,
+  });
+
+  function onDownload(invoiceId: string) {
+    void downloadInvoice({ data: { id: invoiceId } })
+      .then((pdf) =>
+        downloadBase64({ base64: pdf.base64, filename: pdf.filename, contentType: pdf.contentType }),
+      )
+      .catch((err) => toast.error(parseServerError(err).message));
+  }
 
   const [search, setSearch] = useState("");
   const [type, setType] = useState<"ALL" | InvoiceType>("ALL");
@@ -44,11 +79,32 @@ function InvoicesPage() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
 
-  // Mock INVOICES are all ORDER invoices; mark one as a RETURN for variety.
+  // Map the BE InvoiceList page into the frozen-UI InvoiceRow shape (§8.5).
+  // NOTE: the list serializer does not expose the recipient/customer name (it
+  // lives on InvoiceUser, returned only by the detail). Until the BE adds it
+  // (see required_adminpanel_change.md), the customer column shows "—".
   const rows: InvoiceRow[] = useMemo(
-    () => INVOICES.map((i, idx) => ({ ...i, type: idx % 3 === 1 ? "RETURN" : "ORDER" })),
-    [],
+    () =>
+      (invoicesQuery.data?.results ?? []).map((i: InvoiceListItem): InvoiceRow => ({
+        id: String(i.id),
+        order: i.related_order_id ?? i.related_return_id ?? "",
+        customer: "—",
+        amount: num(i.total),
+        issued: i.invoice_date ? i.invoice_date.slice(0, 10) : i.created_at ? i.created_at.slice(0, 10) : "",
+        status: i.status ?? "",
+        type: (i.invoice_type as InvoiceType) ?? "ORDER",
+      })),
+    [invoicesQuery.data],
   );
+
+  const state: PageState =
+    previewState !== "populated"
+      ? previewState
+      : invoicesQuery.isLoading
+        ? "loading"
+        : invoicesQuery.isError
+          ? "error"
+          : "populated";
 
   const statusOptions = useMemo(() => Array.from(new Set(rows.map((r) => r.status))), [rows]);
 
@@ -253,7 +309,7 @@ function InvoicesPage() {
                     aria-label={t("sales.invoices.download")}
                     onClick={(e) => {
                       e.stopPropagation();
-                      toast.success(t("sales.invoice.downloadToast"));
+                      onDownload(i.id);
                     }}
                   >
                     <Download className="h-3.5 w-3.5" />

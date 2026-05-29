@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Undo2, Check, X, Clock } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -18,11 +19,21 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { RETURNS } from "@/lib/mock-data";
-import { returnDetail } from "@/lib/mock/sales";
 import { useApp } from "@/lib/app-context";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listReturns,
+  approveReturn,
+  rejectReturn,
+  type ReturnListItem,
+} from "@/lib/api/returns.functions";
+
+function num(s: string | number | null | undefined): number {
+  const n = typeof s === "number" ? s : parseFloat(String(s ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
 
 export const Route = createFileRoute("/_panel/returns")({
   head: () => ({ meta: [{ title: "Returns — Mixlebs Admin" }] }),
@@ -40,19 +51,50 @@ const RETURN_STATUSES = [
 ] as const;
 const REASONS = ["Damaged on arrival", "Wrong item", "Quality issue", "Changed mind"];
 
-type ReturnRow = (typeof RETURNS)[number] & {
+interface ReturnRow {
+  id: string;
+  order: string;
+  customer: string;
+  reason: string;
+  status: string;
+  value: number;
+  opened: string;
   qty: number;
   handlingFees: number;
   courier: string;
   item: string;
-};
+}
 
 function ReturnsPage() {
   const t = useT();
   const navigate = useNavigate();
-  const state = usePageState();
-  const { role, stores } = useApp();
+  const previewState = usePageState();
+  const { role, stores, currentStoreId } = useApp();
+  const queryClient = useQueryClient();
   const showStore = role !== "store";
+
+  const returnsQuery = useQuery({
+    queryKey: ["returns", currentStoreId],
+    queryFn: () => listReturns({ data: { store_id: currentStoreId, page_size: 200 } }),
+    staleTime: 30 * 1000,
+  });
+
+  const approveMutation = useMutation({
+    mutationFn: (id: string) => approveReturn({ data: { id } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["returns"] });
+      toast.success(t("sales.returns.toastApproved"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const rejectMutation = useMutation({
+    mutationFn: (id: string) => rejectReturn({ data: { id } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["returns"] });
+      toast.success(t("sales.returns.toastRejected"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
 
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<string>("ALL");
@@ -64,12 +106,30 @@ function ReturnsPage() {
 
   const rows: ReturnRow[] = useMemo(
     () =>
-      RETURNS.map((r) => {
-        const d = returnDetail({ value: r.value, status: r.status });
-        return { ...r, qty: d.qty, handlingFees: d.handlingFees, courier: d.courier, item: d.name };
-      }),
-    [],
+      (returnsQuery.data?.results ?? []).map((r: ReturnListItem): ReturnRow => ({
+        id: String(r.id),
+        order: r.order_number ?? "",
+        customer: r.customer_name,
+        reason: r.reason_choice ?? "",
+        status: r.return_status,
+        value: num(r.subtotal),
+        opened: r.created_at ? r.created_at.slice(0, 10) : "",
+        qty: r.quantity,
+        handlingFees: num(r.handling_fees),
+        courier: r.courier_name ?? "",
+        item: r.item_name ?? "",
+      })),
+    [returnsQuery.data],
   );
+
+  const state: PageState =
+    previewState !== "populated"
+      ? previewState
+      : returnsQuery.isLoading
+        ? "loading"
+        : returnsQuery.isError
+          ? "error"
+          : "populated";
 
   const courierOptions = useMemo(() => Array.from(new Set(rows.map((r) => r.courier))), [rows]);
 
@@ -87,12 +147,12 @@ function ReturnsPage() {
         )
           return false;
         return true;
-        // storeId filter is illustrative; the mock RETURNS have no store field.
+        // storeId filter narrows the live list client-side by store name.
       }),
     [rows, status, reason, courier, dateFrom, dateTo, search],
   );
 
-  // KPI counts (mock RETURNS uses REJECTED in place of DECLINED).
+  // KPI counts (BE uses DECLINED; tolerate a legacy REJECTED label too).
   const open = rows.filter((r) => r.status === "CHECKING" || r.status === "PENDING").length;
   const approved = rows.filter((r) => r.status === "APPROVED").length;
   const returned = rows.filter((r) => r.status === "RETURNED").length;
@@ -312,7 +372,7 @@ function ReturnsPage() {
                       className="h-7 text-xs"
                       onClick={(e) => {
                         e.stopPropagation();
-                        toast.success(t("sales.returns.toastRejected"));
+                        rejectMutation.mutate(r.id);
                       }}
                     >
                       {t("sales.returns.reject")}
@@ -324,7 +384,7 @@ function ReturnsPage() {
                       className="h-7 bg-gradient-primary text-xs text-primary-foreground"
                       onClick={(e) => {
                         e.stopPropagation();
-                        toast.success(t("sales.returns.toastApproved"));
+                        approveMutation.mutate(r.id);
                       }}
                     >
                       {t("sales.returns.approve")}

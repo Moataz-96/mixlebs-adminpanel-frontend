@@ -1,4 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -41,10 +42,26 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ORDERS, COURIERS } from "@/lib/mock-data";
-import { orderDetail } from "@/lib/mock/sales";
 import { usePageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
+import { downloadBase64 } from "@/lib/download";
+import {
+  getOrder,
+  transitionOrderStatus,
+  appendTracking,
+  type OrderDetail as ApiOrderDetail,
+  type OrderStatusName,
+} from "@/lib/api/orders.functions";
+import { downloadInvoice } from "@/lib/api/invoices.functions";
+
+function num(s: string | number | null | undefined): number {
+  const n = typeof s === "number" ? s : parseFloat(String(s ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
+function fmtTs(s: string | null | undefined): string {
+  return s ? s.slice(0, 16).replace("T", " ") : "";
+}
 
 export const Route = createFileRoute("/_panel/orders/$id")({
   head: () => ({ meta: [{ title: "Order — Mixlebs Admin" }] }),
@@ -59,24 +76,132 @@ function OrderDetail() {
   const { id } = Route.useParams();
   const pageState = usePageState();
   const { has } = usePermissions();
+  const queryClient = useQueryClient();
 
-  const order = ORDERS.find((o) => o.id === id);
-  // Force not-found when the id is unknown (or previewed via ?state=notfound).
-  const effectiveState = pageState !== "populated" ? pageState : order ? "populated" : "notfound";
-  const o = order ?? ORDERS[0];
-  const d = orderDetail({
-    id: o.id,
-    total: o.total,
-    items: o.items,
-    customer: o.customer,
-    status: o.status,
-    placed: o.placed,
+  const orderQuery = useQuery({
+    queryKey: ["order", id],
+    queryFn: () => getOrder({ data: { id } }),
+    retry: false,
   });
+  const api = orderQuery.data;
+
+  // Resolve the page state: preview override > live loading/error/notfound.
+  const notFound = orderQuery.isError && parseServerError(orderQuery.error).errorType !== null
+    ? true
+    : orderQuery.isError;
+  const effectiveState =
+    pageState !== "populated"
+      ? pageState
+      : orderQuery.isLoading
+        ? "loading"
+        : notFound
+          ? "notfound"
+          : "populated";
+
+  // Map the BE OrderDetail into the frozen-UI `o` (list-ish) + `d` (detail)
+  // shapes the JSX renders. Falls back to empty shapes while loading/not-found.
+  const transfer = (api?.transfer_status as "PENDING" | "IN_WALLET" | "TRANSFERRED") ?? "PENDING";
+  const payment: "PAID" | "PENDING" | "REFUNDED" =
+    api?.order_status === "CANCELLED"
+      ? "REFUNDED"
+      : transfer === "TRANSFERRED" || transfer === "IN_WALLET"
+        ? "PAID"
+        : "PENDING";
+  const o = {
+    id,
+    number: api?.order_number ?? "",
+    customer: api?.customer_name ?? "",
+    store: api?.store_name ?? "",
+    total: num(api?.total),
+    status: (api?.order_status ?? "PENDING") as OrderStatusName,
+    payment,
+    items: api?.items_count ?? 0,
+    placed: fmtTs(api?.created_at),
+  };
+  const addr = api?.address;
+  const cust = api?.customer;
+  const courier = api?.courier_detail;
+  const d = {
+    paymentType: api?.payment_type ?? "—",
+    transferStatus: transfer,
+    courier: courier?.name ?? api?.courier_name ?? "—",
+    etaDays: courier?.eta_days ?? "—",
+    baseFee: num(courier?.base_fee),
+    deliveryFee: num(api?.delivery_fees),
+    tax: num(api?.tax),
+    subtotal: num(api?.subtotal),
+    coupon: api?.coupon_code ?? undefined,
+    serial: api?.serial_number ?? "—",
+    customer: {
+      email: cust?.email ?? "—",
+      phone: cust?.phone ?? "—",
+      id: cust?.id ?? "",
+      returnBlocked: cust?.is_return_blocked ?? false,
+    },
+    address: {
+      recipient: addr?.recipient_name ?? "",
+      phone: addr?.phone_number ?? "",
+      country: addr?.country ?? "",
+      city: addr?.city ?? "",
+      governorate: addr?.governorate ?? "",
+      area: addr?.area ?? "",
+      postcode: addr?.postcode ?? "",
+      street: addr?.street ?? "",
+      building: addr?.building ?? 0,
+      floor: addr?.floor ?? 0,
+      apartment: addr?.apartment ?? 0,
+      note: addr?.note ?? "",
+    },
+    lines: (api?.items ?? []).map((it) => ({
+      model: it.model_number ?? it.sku ?? String(it.id),
+      name: it.model_number ?? it.sku ?? "—",
+      attributes: it.attributes.map((a) => `${a.property}: ${a.value}`).join(" · "),
+      qty: it.quantity,
+      price: num(it.price),
+      discount: num(it.discount),
+      isReturned: it.is_returned,
+    })),
+    tracking: (api?.tracking ?? [])
+      .slice()
+      .reverse()
+      .map((e) => ({
+        details: e.details,
+        at: fmtTs(e.timestamp),
+        courier: courier?.name ?? undefined,
+      })),
+    audit: [] as { who: string; what: string; at: string }[],
+  };
+  const allowed = api?.allowed_transitions ?? [];
+  const canTransitionTo = (s: OrderStatusName) => allowed.includes(s);
 
   const currentStep = FLOW.indexOf(o.status as (typeof FLOW)[number]);
   const canRefund =
     (d.transferStatus === "IN_WALLET" || d.transferStatus === "TRANSFERRED") &&
     o.status === "DELIVERED";
+
+  // Status-transition mutation (shared by every action-bar button). The BE
+  // legal-graph + per-edge perm decide success; failures route to the toaster.
+  const statusMutation = useMutation({
+    mutationFn: (status: OrderStatusName) => transitionOrderStatus({ data: { id, status } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["order", id] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  function move(status: OrderStatusName, toastKey: string) {
+    statusMutation.mutate(status, { onSuccess: () => toast.success(t(toastKey)) });
+  }
+
+  // Invoice PDF download (§8.2 "Print invoice" button).
+  function onDownloadInvoice() {
+    if (api?.invoice == null) {
+      toast.error(t("sales.order.printInvoice"));
+      return;
+    }
+    void downloadInvoice({ data: { id: String(api.invoice) } })
+      .then((pdf) =>
+        downloadBase64({ base64: pdf.base64, filename: pdf.filename, contentType: pdf.contentType }),
+      )
+      .catch((err) => toast.error(parseServerError(err).message));
+  }
 
   const appendSchema = z.object({
     details: z.string().min(1, t("sales.order.appendDetailsRequired")),
@@ -91,14 +216,35 @@ function OrderDetail() {
     register,
     handleSubmit,
     setValue,
+    setError,
     reset,
     formState: { errors, isSubmitting },
   } = form;
 
-  function onAppend() {
-    toast.success(t("sales.order.toastTrackingAppended"));
-    reset();
+  const appendMutation = useMutation({
+    mutationFn: (v: AppendValues) =>
+      appendTracking({
+        data: { id, details: v.details, courier_id: v.courier_id || undefined },
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["order", id] });
+      toast.success(t("sales.order.toastTrackingAppended"));
+      reset();
+    },
+    onError: (err) => {
+      const info = parseServerError(err);
+      const msg = fieldMessage(info.fieldErrors, "details");
+      if (msg) setError("details", { message: msg });
+      else toast.error(info.message);
+    },
+  });
+  function onAppend(values: AppendValues) {
+    appendMutation.mutate(values);
   }
+
+  // Courier options for the tracking-append form: the order's own courier (full
+  // courier admin lives in P6). Reuse `COURIERS`-shaped {id,name} entries.
+  const COURIERS = courier ? [{ id: String(courier.id), name: courier.name ?? "" }] : [];
 
   return (
     <div className="p-6">
@@ -117,10 +263,7 @@ function OrderDetail() {
               </Link>
             </Button>
             <Can perm="invoices.download">
-              <Button
-                variant="outline"
-                onClick={() => toast.success(t("sales.order.printInvoice"))}
-              >
+              <Button variant="outline" onClick={onDownloadInvoice}>
                 <Printer className="me-1.5 h-4 w-4" /> {t("sales.order.printInvoice")}
               </Button>
             </Can>
@@ -152,8 +295,8 @@ function OrderDetail() {
               <Can perm="orders.transition_status">
                 <Button
                   size="sm"
-                  disabled={o.status !== "PENDING"}
-                  onClick={() => toast.success(t("sales.order.toastReady"))}
+                  disabled={!canTransitionTo("READY") || statusMutation.isPending}
+                  onClick={() => move("READY", "sales.order.toastReady")}
                 >
                   <CheckCircle2 className="me-1.5 h-3.5 w-3.5" /> {t("sales.order.markReady")}
                 </Button>
@@ -161,8 +304,8 @@ function OrderDetail() {
               <Can perm="orders.transition_status">
                 <Button
                   size="sm"
-                  disabled={o.status !== "READY"}
-                  onClick={() => toast.success(t("sales.order.toastShipped"))}
+                  disabled={!canTransitionTo("SHIPPED") || statusMutation.isPending}
+                  onClick={() => move("SHIPPED", "sales.order.toastShipped")}
                 >
                   <Truck className="me-1.5 h-3.5 w-3.5" /> {t("sales.order.markShipped")}
                 </Button>
@@ -170,8 +313,8 @@ function OrderDetail() {
               <Can perm="orders.transition_status">
                 <Button
                   size="sm"
-                  disabled={o.status !== "SHIPPED"}
-                  onClick={() => toast.success(t("sales.order.toastDelivered"))}
+                  disabled={!canTransitionTo("DELIVERED") || statusMutation.isPending}
+                  onClick={() => move("DELIVERED", "sales.order.toastDelivered")}
                 >
                   <CheckCircle2 className="me-1.5 h-3.5 w-3.5" /> {t("sales.order.markDelivered")}
                 </Button>
@@ -183,7 +326,7 @@ function OrderDetail() {
                       size="sm"
                       variant="outline"
                       className="text-destructive"
-                      disabled={o.status !== "PENDING" && o.status !== "READY"}
+                      disabled={!canTransitionTo("CANCELLED")}
                     >
                       <XCircle className="me-1.5 h-3.5 w-3.5" /> {t("sales.order.cancel")}
                     </Button>
@@ -192,7 +335,7 @@ function OrderDetail() {
                   description={t("sales.order.confirmCancelDesc")}
                   destructive
                   confirmLabel={t("sales.order.cancel")}
-                  onConfirm={() => toast.success(t("sales.order.toastCancelled"))}
+                  onConfirm={() => move("CANCELLED", "sales.order.toastCancelled")}
                 />
               </Can>
               <Can perm="orders.decline">
@@ -202,7 +345,7 @@ function OrderDetail() {
                       size="sm"
                       variant="outline"
                       className="text-destructive"
-                      disabled={o.status !== "PENDING"}
+                      disabled={!canTransitionTo("DECLINED")}
                     >
                       <XCircle className="me-1.5 h-3.5 w-3.5" /> {t("sales.order.decline")}
                     </Button>
@@ -211,15 +354,15 @@ function OrderDetail() {
                   description={t("sales.order.confirmDeclineDesc")}
                   destructive
                   confirmLabel={t("sales.order.decline")}
-                  onConfirm={() => toast.success(t("sales.order.toastDeclined"))}
+                  onConfirm={() => move("DECLINED", "sales.order.toastDeclined")}
                 />
               </Can>
               <Can perm="orders.report_delivery_issue">
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={o.status !== "SHIPPED"}
-                  onClick={() => toast.success(t("sales.order.toastDeliveryIssue"))}
+                  disabled={!canTransitionTo("DELIVERY_ISSUE") || statusMutation.isPending}
+                  onClick={() => move("DELIVERY_ISSUE", "sales.order.toastDeliveryIssue")}
                 >
                   <AlertTriangle className="me-1.5 h-3.5 w-3.5" /> {t("sales.order.deliveryIssue")}
                 </Button>

@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -16,10 +17,24 @@ import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { PageStates } from "@/components/shared/states";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { RETURNS } from "@/lib/mock-data";
-import { returnDetail } from "@/lib/mock/sales";
 import { usePageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
+import { parseServerError } from "@/lib/api/error";
+import {
+  getReturn,
+  approveReturn,
+  rejectReturn,
+  transitionReturn,
+  type ReturnStatusName,
+} from "@/lib/api/returns.functions";
+
+function num(s: string | number | null | undefined): number {
+  const n = typeof s === "number" ? s : parseFloat(String(s ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
+function fmtTs(s: string | null | undefined): string {
+  return s ? s.slice(0, 16).replace("T", " ") : "";
+}
 
 export const Route = createFileRoute("/_panel/returns/$id")({
   head: () => ({ meta: [{ title: "Return — Mixlebs Admin" }] }),
@@ -30,14 +45,77 @@ function ReturnDetail() {
   const t = useT();
   const { id } = Route.useParams();
   const pageState = usePageState();
+  const queryClient = useQueryClient();
 
-  const found = RETURNS.find((x) => x.id === id);
-  const effectiveState = pageState !== "populated" ? pageState : found ? "populated" : "notfound";
-  const r = found ?? RETURNS[0];
-  const d = returnDetail({ value: r.value, status: r.status });
+  const returnQuery = useQuery({
+    queryKey: ["return", id],
+    queryFn: () => getReturn({ data: { id } }),
+    retry: false,
+  });
+  const api = returnQuery.data;
+  const effectiveState =
+    pageState !== "populated"
+      ? pageState
+      : returnQuery.isLoading
+        ? "loading"
+        : returnQuery.isError
+          ? "notfound"
+          : "populated";
 
+  // Map the BE ReturnDetail into the frozen-UI `r` + `d` shapes.
+  const item = api?.item;
+  const r = {
+    id,
+    order: api?.order_number ?? "",
+    customer: api?.customer_name ?? "",
+    reason: api?.reason_choice ?? "",
+    status: api?.return_status ?? "PENDING",
+    value: num(api?.subtotal),
+    opened: api?.created_at ? api.created_at.slice(0, 10) : "",
+  };
+  const d = {
+    name: item?.model_number ?? item?.sku ?? api?.item_name ?? "—",
+    model: item?.model_number ?? item?.sku ?? String(item?.id ?? ""),
+    attributes: (item?.attributes ?? []).map((a) => `${a.property}: ${a.value}`).join(" · "),
+    qty: api?.quantity ?? item?.quantity ?? 0,
+    price: num(item?.price ?? api?.subtotal),
+    reasonDescription: api?.reason_description ?? "",
+    attachments: (api?.attachments ?? []).length,
+    tracking: (api?.tracking ?? [])
+      .slice()
+      .reverse()
+      .map((e) => ({ details: e.details, at: fmtTs(e.timestamp), courier: api?.courier_name ?? undefined })),
+  };
+
+  const allowed = api?.allowed_transitions ?? [];
+  const canTransitionTo = (s: ReturnStatusName) => allowed.includes(s);
   const isOpen = r.status === "PENDING" || r.status === "CHECKING";
-  const canMarkReturned = r.status === "APPROVED";
+  const canMarkReturned = canTransitionTo("RETURNED");
+
+  const approveMutation = useMutation({
+    mutationFn: () => approveReturn({ data: { id } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["return", id] });
+      toast.success(t("sales.return.toastApproved"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const rejectMutation = useMutation({
+    mutationFn: () => rejectReturn({ data: { id } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["return", id] });
+      toast.success(t("sales.return.toastDeclined"));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const transitionMutation = useMutation({
+    mutationFn: (status: ReturnStatusName) => transitionReturn({ data: { id, status } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["return", id] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  function moveReturn(status: ReturnStatusName, toastKey: string) {
+    transitionMutation.mutate(status, { onSuccess: () => toast.success(t(toastKey)) });
+  }
 
   return (
     <div className="p-6">
@@ -53,8 +131,8 @@ function ReturnDetail() {
             </Button>
             <Can perm="returns.approve">
               <Button
-                disabled={!isOpen}
-                onClick={() => toast.success(t("sales.return.toastApproved"))}
+                disabled={!isOpen || approveMutation.isPending}
+                onClick={() => approveMutation.mutate()}
               >
                 <CheckCircle2 className="me-1.5 h-4 w-4" /> {t("sales.return.approve")}
               </Button>
@@ -70,14 +148,14 @@ function ReturnDetail() {
                 description={t("sales.return.confirmDeclineDesc")}
                 destructive
                 confirmLabel={t("sales.return.decline")}
-                onConfirm={() => toast.success(t("sales.return.toastDeclined"))}
+                onConfirm={() => rejectMutation.mutate()}
               />
             </Can>
             <Can perm="returns.transition">
               <Button
                 variant="outline"
-                disabled={!canMarkReturned}
-                onClick={() => toast.success(t("sales.return.toastReturned"))}
+                disabled={!canMarkReturned || transitionMutation.isPending}
+                onClick={() => moveReturn("RETURNED", "sales.return.toastReturned")}
               >
                 <Undo2 className="me-1.5 h-4 w-4" /> {t("sales.return.markReturned")}
               </Button>
@@ -85,7 +163,8 @@ function ReturnDetail() {
             <Can perm="returns.transition">
               <Button
                 variant="outline"
-                onClick={() => toast.success(t("sales.return.toastDeliveryIssue"))}
+                disabled={!canTransitionTo("DELIVERY_ISSUE") || transitionMutation.isPending}
+                onClick={() => moveReturn("DELIVERY_ISSUE", "sales.return.toastDeliveryIssue")}
               >
                 <AlertTriangle className="me-1.5 h-4 w-4" /> {t("sales.return.deliveryIssue")}
               </Button>

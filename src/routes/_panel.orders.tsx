@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ShoppingCart,
   Clock,
@@ -36,11 +37,38 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ORDERS, type Order, type OrderStatus } from "@/lib/mock-data";
-import { orderDetail, type PaymentType, type TransferStatus } from "@/lib/mock/sales";
 import { useApp } from "@/lib/app-context";
-import { usePageState } from "@/lib/page-state";
+import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
+import { parseServerError } from "@/lib/api/error";
+import {
+  listOrders,
+  transitionOrderStatus,
+  type OrderListItem,
+  type OrderStatusName,
+} from "@/lib/api/orders.functions";
+
+// Frozen-UI local types (were imported from mock/sales). The §8.1 table renders
+// these names; they are mapped from the BE OrderList below.
+type OrderStatus = OrderStatusName;
+type PaymentType = "COD" | "CC" | "QR" | "NS";
+type TransferStatus = "PENDING" | "IN_WALLET" | "TRANSFERRED";
+interface Order {
+  id: string;
+  number: string;
+  customer: string;
+  store: string;
+  total: number;
+  status: OrderStatus;
+  payment: "PAID" | "PENDING" | "REFUNDED";
+  items: number;
+  placed: string;
+}
+
+function num(s: string | number | null | undefined): number {
+  const n = typeof s === "number" ? s : parseFloat(String(s ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
 
 export const Route = createFileRoute("/_panel/orders")({
   head: () => ({ meta: [{ title: "Orders — Mixlebs Admin" }] }),
@@ -73,10 +101,45 @@ interface OrderRow extends Order {
 function OrdersPage() {
   const t = useT();
   const navigate = useNavigate();
-  const state = usePageState();
-  const { role, stores } = useApp();
+  const previewState = usePageState();
+  const { role, stores, currentStoreId } = useApp();
   const { has } = usePermissions();
+  const queryClient = useQueryClient();
   const showStore = role !== "store";
+
+  // Live orders. STAFF/ADMIN scope to the topbar store picker (null = all);
+  // STORE users are auto-scoped on the BE.
+  const ordersQuery = useQuery({
+    queryKey: ["orders", currentStoreId],
+    queryFn: () => listOrders({ data: { store_id: currentStoreId, page_size: 200 } }),
+    staleTime: 30 * 1000,
+  });
+
+  const storeNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    stores.forEach((s) => m.set(s.id, s.name));
+    return m;
+  }, [stores]);
+
+  // Bulk status transition. Each selected order is transitioned independently;
+  // the BE rejects illegal/unpermitted edges per row (surfaced via toast).
+  const bulkTransition = useMutation({
+    mutationFn: async (v: { ids: string[]; status: OrderStatusName }) => {
+      await Promise.all(
+        v.ids.map((id) => transitionOrderStatus({ data: { id, status: v.status } })),
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["orders"] });
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: (id: string) => transitionOrderStatus({ data: { id, status: "CANCELLED" } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["orders"] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
 
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"ALL" | OrderStatus>("ALL");
@@ -90,32 +153,51 @@ function OrdersPage() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
 
-  // Augment list rows with sales-detail fields (deterministic per order).
+  // Map the BE OrderList page into the frozen-UI OrderRow shape (§8.1).
   const rows: OrderRow[] = useMemo(
     () =>
-      ORDERS.map((o) => {
-        const d = orderDetail({
-          id: o.id,
-          total: o.total,
-          items: o.items,
-          customer: o.customer,
-          status: o.status,
-          placed: o.placed,
-        });
+      (ordersQuery.data?.results ?? []).map((o: OrderListItem): OrderRow => {
+        const transfer = (o.transfer_status as TransferStatus) ?? "PENDING";
+        // `payment` (PAID/PENDING/REFUNDED) drives the revenue KPI only; derive
+        // it from transfer_status / order_status since the BE has no such field.
+        const payment: Order["payment"] =
+          o.order_status === "CANCELLED"
+            ? "REFUNDED"
+            : transfer === "TRANSFERRED" || transfer === "IN_WALLET"
+              ? "PAID"
+              : "PENDING";
         return {
-          ...o,
-          paymentType: d.paymentType,
-          transferStatus: d.transferStatus,
-          courier: d.courier,
-          subtotal: d.subtotal,
-          tax: d.tax,
-          delivery: d.deliveryFee,
-          hasCoupon: !!d.coupon,
-          deliveredAt: d.deliveredAt,
+          id: String(o.id),
+          number: o.order_number,
+          customer: o.customer_name,
+          store: o.store ? (storeNameById.get(o.store) ?? o.store_name ?? o.store) : (o.store_name ?? ""),
+          total: num(o.total),
+          status: o.order_status,
+          payment,
+          items: o.items_count,
+          placed: o.created_at ? o.created_at.slice(0, 16).replace("T", " ") : "",
+          paymentType: (o.payment_type as PaymentType) ?? "COD",
+          transferStatus: transfer,
+          courier: o.courier_name ?? "",
+          subtotal: num(o.subtotal),
+          tax: num(o.tax),
+          delivery: num(o.delivery_fees),
+          hasCoupon: o.has_coupon,
+          deliveredAt: o.delivered_at ? o.delivered_at.slice(0, 16).replace("T", " ") : undefined,
         };
       }),
-    [],
+    [ordersQuery.data, storeNameById],
   );
+
+  // Drive the page state from the live query (preview override still honoured).
+  const state: PageState =
+    previewState !== "populated"
+      ? previewState
+      : ordersQuery.isLoading
+        ? "loading"
+        : ordersQuery.isError
+          ? "error"
+          : "populated";
 
   const courierOptions = useMemo(() => Array.from(new Set(rows.map((r) => r.courier))), [rows]);
 
@@ -462,8 +544,7 @@ function OrdersPage() {
                 ? [
                     {
                       label: t("sales.orders.bulkTransition"),
-                      onClick: (ids) =>
-                        toast.info(`${t("sales.orders.bulkTransition")} · ${ids.length}`),
+                      onClick: (ids) => bulkTransition.mutate({ ids, status: "READY" }),
                     },
                   ]
                 : undefined
@@ -512,7 +593,11 @@ function OrdersPage() {
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
                           className="text-destructive"
-                          onClick={() => toast.success(t("sales.order.toastCancelled"))}
+                          onClick={() =>
+                            cancelMutation.mutate(o.id, {
+                              onSuccess: () => toast.success(t("sales.order.toastCancelled")),
+                            })
+                          }
                         >
                           {t("sales.orders.cancel")}
                         </DropdownMenuItem>

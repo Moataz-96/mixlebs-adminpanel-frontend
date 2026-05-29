@@ -366,71 +366,8 @@ export const PROPERTIES = [
 // removed: P4 Wire — tag suggestions sourced live; no catalog consumer left.
 export const TAGS = ["new", "best-seller", "organic", "vegan", "halal", "gluten-free", "limited"];
 
-export const RETURNS = [
-  {
-    id: "r_801",
-    order: "MX-4488",
-    customer: "Layla Haddad",
-    reason: "Damaged on arrival",
-    status: "CHECKING",
-    value: 38.0,
-    opened: "2026-05-26",
-  },
-  {
-    id: "r_802",
-    order: "MX-4486",
-    customer: "Rami Geagea",
-    reason: "Wrong item",
-    status: "APPROVED",
-    value: 19.8,
-    opened: "2026-05-25",
-  },
-  {
-    id: "r_803",
-    order: "MX-4480",
-    customer: "Nour Saade",
-    reason: "Quality issue",
-    status: "RETURNED",
-    value: 11.2,
-    opened: "2026-05-22",
-  },
-  {
-    id: "r_804",
-    order: "MX-4475",
-    customer: "Hadi Nasr",
-    reason: "Changed mind",
-    status: "REJECTED",
-    value: 41.9,
-    opened: "2026-05-20",
-  },
-];
-
-export const INVOICES = [
-  {
-    id: "inv_2026_0188",
-    order: "MX-4499",
-    customer: "Nour Saade",
-    amount: 145.2,
-    issued: "2026-05-27",
-    status: "ISSUED",
-  },
-  {
-    id: "inv_2026_0187",
-    order: "MX-4498",
-    customer: "Rami Geagea",
-    amount: 19.8,
-    issued: "2026-05-27",
-    status: "ISSUED",
-  },
-  {
-    id: "inv_2026_0186",
-    order: "MX-4494",
-    customer: "Hadi Nasr",
-    amount: 41.9,
-    issued: "2026-05-25",
-    status: "ISSUED",
-  },
-];
+// removed: P5 Wire — returns are fetched live via listReturns(); no consumer left.
+// removed: P5 Wire — invoices are fetched live via listInvoices(); no consumer left.
 
 export const COURIERS = [
   { id: "cou_01", name: "Beirut Express", areas: 12, active: true },

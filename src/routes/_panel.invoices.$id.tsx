@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Download, Mail, Printer } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -15,10 +16,16 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { INVOICES } from "@/lib/mock-data";
-import { invoiceDetail } from "@/lib/mock/sales";
 import { usePageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
+import { parseServerError } from "@/lib/api/error";
+import { downloadBase64 } from "@/lib/download";
+import { getInvoice, downloadInvoice } from "@/lib/api/invoices.functions";
+
+function num(s: string | number | null | undefined): number {
+  const n = typeof s === "number" ? s : parseFloat(String(s ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
 
 export const Route = createFileRoute("/_panel/invoices/$id")({
   head: () => ({ meta: [{ title: "Invoice — Mixlebs Admin" }] }),
@@ -30,10 +37,67 @@ function InvoiceDetail() {
   const { id } = Route.useParams();
   const pageState = usePageState();
 
-  const found = INVOICES.find((i) => i.id === id);
-  const effectiveState = pageState !== "populated" ? pageState : found ? "populated" : "notfound";
-  const inv = found ?? INVOICES[0];
-  const d = invoiceDetail({ id: inv.id, amount: inv.amount, customer: inv.customer });
+  const invoiceQuery = useQuery({
+    queryKey: ["invoice", id],
+    queryFn: () => getInvoice({ data: { id } }),
+    retry: false,
+  });
+  const api = invoiceQuery.data;
+  const effectiveState =
+    pageState !== "populated"
+      ? pageState
+      : invoiceQuery.isLoading
+        ? "loading"
+        : invoiceQuery.isError
+          ? "notfound"
+          : "populated";
+
+  const recipient = api?.recipients?.[0];
+  const inv = {
+    id,
+    status: api?.status ?? "",
+    issued: api?.invoice_date ? api.invoice_date.slice(0, 10) : "",
+    order: api?.related_order_id ?? api?.related_return_id ?? "",
+  };
+  const d = {
+    type: (api?.invoice_type as "ORDER" | "RETURN") ?? "ORDER",
+    recipient: {
+      name: recipient?.recipient_name ?? recipient?.recipient_username ?? "—",
+      email: recipient?.recipient_username ?? "—",
+      city: [recipient?.city, recipient?.area].filter(Boolean).join(", "),
+      phone: recipient?.phone_number ?? "—",
+    },
+    lines: (api?.items ?? []).map((it) => ({
+      name: it.model_number ?? "—",
+      model: it.model_number ?? String(it.id),
+      qty: it.quantity,
+      price: num(it.price),
+      discount: num(it.discount),
+    })),
+    coupon: api?.coupon
+      ? {
+          code: api.coupon.code ?? "",
+          value:
+            api.coupon.discount_type === "PERCENTAGE"
+              ? `${num(api.coupon.discount_value)}%`
+              : `$${num(api.coupon.discount_value).toFixed(2)}`,
+          cappedAt: api.coupon.capped_at ? `$${num(api.coupon.capped_at).toFixed(2)}` : "—",
+        }
+      : undefined,
+    tax: num(api?.tax),
+    fees: num(api?.fees),
+    paymentType: recipient?.payment_type ?? "—",
+    transferStatus: recipient?.transfer_status ?? "PENDING",
+    serial: recipient?.serial_number ?? "—",
+  };
+
+  function onDownload() {
+    void downloadInvoice({ data: { id } })
+      .then((pdf) =>
+        downloadBase64({ base64: pdf.base64, filename: pdf.filename, contentType: pdf.contentType }),
+      )
+      .catch((err) => toast.error(parseServerError(err).message));
+  }
 
   const subtotal = d.lines.reduce((a, l) => a + (l.price - l.discount) * l.qty, 0);
   const grandTotal = subtotal + d.tax + d.fees;
@@ -63,7 +127,7 @@ function InvoiceDetail() {
             <Can perm="invoices.download">
               <Button
                 className="bg-gradient-primary text-primary-foreground shadow-glow"
-                onClick={() => toast.success(t("sales.invoice.downloadToast"))}
+                onClick={onDownload}
               >
                 <Download className="me-1.5 h-4 w-4" /> {t("sales.invoice.downloadPdf")}
               </Button>
