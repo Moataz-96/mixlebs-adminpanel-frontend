@@ -19,12 +19,16 @@ import { toClientError } from "./error";
 
 export interface TopProduct {
   product_id: string;
+  product_name: string;
+  sku: string;
   units_sold: number;
   revenue: string; // decimal string
+  conversion_rate: number; // orders-with-product ÷ product visits
 }
 
 export interface TopCategory {
   category_id: number | null;
+  category_name: string;
   units_sold: number;
   revenue: string; // decimal string
 }
@@ -32,9 +36,44 @@ export interface TopCategory {
 export interface StockAlert {
   variant_id: number;
   product_id: string;
+  product_name: string;
   sku: string;
   current_stock: number;
   threshold: number;
+  last_sold_at: string | null; // ISO datetime, null if never sold
+}
+
+export interface RecentOrder {
+  order_id: string;
+  order_number: string;
+  customer: string;
+  total: string; // decimal string
+  status: string;
+  created_at: string; // ISO datetime
+}
+
+export interface PendingReturn {
+  return_id: string;
+  return_number: string;
+  order_number: string;
+  item: string;
+  reason: string;
+  requested_at: string; // ISO datetime
+}
+
+export interface TopCourier {
+  courier_id: string;
+  name: string;
+  eta: number; // eta_days
+  base_fee: string; // decimal string
+  success_rate: number | null; // delivered ÷ orders, null if no orders
+}
+
+export interface DashboardAttention {
+  pending_returns_count: number;
+  low_stock_count: number;
+  support_awaiting_count: number;
+  identity_review_pending_count?: number; // present only for reviewers
 }
 
 export interface OverviewDelta {
@@ -67,10 +106,16 @@ export interface OverviewPayload {
   avg_store_rating: number | null;
   wallet_inflow: string;
   wallet_outflow: string;
+  wallet_balance: string;
+  wallet_currency: string;
   coupon_redemptions: number;
   top_products: TopProduct[];
   top_categories: TopCategory[];
   stock_alerts: StockAlert[];
+  recent_orders: RecentOrder[];
+  pending_returns: PendingReturn[];
+  top_couriers: TopCourier[];
+  attention: DashboardAttention;
   deltas: OverviewDelta | null;
 }
 
@@ -102,6 +147,8 @@ export interface WalletPayload {
   all_stores: boolean;
   wallet_inflow: string;
   wallet_outflow: string;
+  wallet_balance: string;
+  wallet_currency: string;
 }
 
 // ---------------------------------------------------------------------------

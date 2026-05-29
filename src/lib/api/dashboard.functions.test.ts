@@ -55,12 +55,62 @@ describe("getOverview server fn", () => {
       avg_store_rating: 4.8,
       wallet_inflow: "8450.00",
       wallet_outflow: "2120.00",
+      wallet_balance: "6330.00",
+      wallet_currency: "EGP",
       coupon_redemptions: 48,
-      top_products: [{ product_id: "p_1", units_sold: 120, revenue: "4560.00" }],
-      top_categories: [{ category_id: 3, units_sold: 412, revenue: "8240.00" }],
-      stock_alerts: [
-        { variant_id: 9, product_id: "p_3", sku: "ROS-205", current_stock: 0, threshold: 10 },
+      top_products: [
+        {
+          product_id: "p_1",
+          product_name: "Rose Water 500ml",
+          sku: "ROS-100",
+          units_sold: 120,
+          revenue: "4560.00",
+          conversion_rate: 0.21,
+        },
       ],
+      top_categories: [
+        { category_id: 3, category_name: "Pantry", units_sold: 412, revenue: "8240.00" },
+      ],
+      stock_alerts: [
+        {
+          variant_id: 9,
+          product_id: "p_3",
+          product_name: "Saffron Threads",
+          sku: "ROS-205",
+          current_stock: 0,
+          threshold: 10,
+          last_sold_at: "2026-05-28T10:00:00Z",
+        },
+      ],
+      recent_orders: [
+        {
+          order_id: "o_1",
+          order_number: "MX-4488",
+          customer: "Karim Nassar",
+          total: "148.64",
+          status: "DELIVERED",
+          created_at: "2026-05-29T09:00:00Z",
+        },
+      ],
+      pending_returns: [
+        {
+          return_id: "r_1",
+          return_number: "RT-201",
+          order_number: "MX-4488",
+          item: "Saffron Threads",
+          reason: "Damaged",
+          requested_at: "2026-05-29T08:00:00Z",
+        },
+      ],
+      top_couriers: [
+        { courier_id: "c_1", name: "Bosta", eta: 2, base_fee: "20.00", success_rate: 0.96 },
+      ],
+      attention: {
+        pending_returns_count: 4,
+        low_stock_count: 7,
+        support_awaiting_count: 2,
+        identity_review_pending_count: 1,
+      },
       deltas: {
         revenue_gross: 0.182,
         revenue_net: 0.161,
@@ -90,6 +140,19 @@ describe("getOverview server fn", () => {
     expect(url).toContain("store_id=str_7");
     expect(url).toContain("compare_to=prev_period");
     expect(result).toEqual(overview);
+
+    // ENTRY 015/016/017: the enriched fields survive the RPC boundary.
+    const r = result as typeof overview;
+    expect(r.top_products[0].product_name).toBe("Rose Water 500ml");
+    expect(r.top_products[0].conversion_rate).toBe(0.21);
+    expect(r.top_categories[0].category_name).toBe("Pantry");
+    expect(r.stock_alerts[0].last_sold_at).toBe("2026-05-28T10:00:00Z");
+    expect(r.wallet_balance).toBe("6330.00");
+    expect(r.recent_orders[0].order_number).toBe("MX-4488");
+    expect(r.pending_returns[0].return_number).toBe("RT-201");
+    expect(r.top_couriers[0].name).toBe("Bosta");
+    expect(r.attention.support_awaiting_count).toBe(2);
+    expect(r.attention.identity_review_pending_count).toBe(1);
   });
 
   it("omits a null store_id (cross-store aggregate) from the query string", async () => {

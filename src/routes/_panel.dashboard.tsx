@@ -180,6 +180,25 @@ function Dashboard() {
       : (stores.find((s) => s.id === store)?.name ?? store);
   const compareLabel = compare === "prev" ? t("dashboard.comparePrev") : t("dashboard.compareYear");
 
+  // Map the live recent-orders payload (order_number / customer / total / status
+  // / created_at, ENTRY 017) into the frozen row shape the markup consumes. The
+  // dashboard contract carries no per-order store/item-count, so `store` reuses
+  // the active store label and `items` is omitted (0).
+  const recentOrderRows = useMemo(
+    () =>
+      (o?.recent_orders ?? []).map((row) => ({
+        id: row.order_id,
+        number: row.order_number,
+        customer: row.customer || "—",
+        store: storeLabel,
+        total: Number(row.total) || 0,
+        status: row.status,
+        items: 0,
+        placed: fmtRelative(row.created_at),
+      })),
+    [o?.recent_orders, storeLabel],
+  );
+
   return (
     <div className="p-6">
       <PageHeader
@@ -439,20 +458,26 @@ function Dashboard() {
                         <div className="grid h-8 w-8 place-items-center rounded-md bg-muted text-xs font-mono">
                           {p.product_id.slice(0, 3).toUpperCase()}
                         </div>
-                        {/* BE top_products carries no product name (ENTRY 015). */}
-                        <span className="text-sm font-medium font-mono">{p.product_id}</span>
+                        {/* Display name from ProductInfo (active language), id fallback (ENTRY 015). */}
+                        <span className="text-sm font-medium font-mono">
+                          {p.product_name || p.product_id}
+                        </span>
                       </div>
                     </TableCell>
-                    {/* BE top_products carries no SKU (ENTRY 015). */}
-                    <TableCell className="font-mono text-xs text-muted-foreground">—</TableCell>
+                    {/* SKU / model_number from the product's variant (ENTRY 015). */}
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {p.sku || "—"}
+                    </TableCell>
                     <TableCell className="text-end font-mono tabular-nums">
                       {fmtNum(p.units_sold)}
                     </TableCell>
                     <TableCell className="text-end font-mono tabular-nums">
                       {fmtMoney(p.revenue)}
                     </TableCell>
-                    {/* BE top_products carries no per-product conversion (ENTRY 015). */}
-                    <TableCell className="text-end text-muted-foreground">—</TableCell>
+                    {/* Per-product conversion: orders-with-product ÷ visits (ENTRY 015). */}
+                    <TableCell className="text-end text-muted-foreground">
+                      {fmtPct(p.conversion_rate)}
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -481,9 +506,9 @@ function Dashboard() {
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {i + 1}
                     </TableCell>
-                    {/* BE top_categories carries category_id only, no name (ENTRY 015). */}
+                    {/* Display name from CategoryTranslation (active language), id fallback (ENTRY 015). */}
                     <TableCell className="text-sm font-medium font-mono">
-                      {c.category_id != null ? `#${c.category_id}` : "—"}
+                      {c.category_name || (c.category_id != null ? `#${c.category_id}` : "—")}
                     </TableCell>
                     <TableCell className="text-end font-mono tabular-nums">
                       {fmtNum(c.units_sold)}
@@ -521,8 +546,10 @@ function Dashboard() {
               <TableBody>
                 {(o?.stock_alerts ?? []).slice(0, 5).map((a) => (
                   <TableRow key={a.variant_id}>
-                    {/* BE stock_alerts carries product_id + sku, no product name (ENTRY 015). */}
-                    <TableCell className="text-sm font-medium font-mono">{a.product_id}</TableCell>
+                    {/* Display name from ProductInfo (active language), id fallback (ENTRY 015). */}
+                    <TableCell className="text-sm font-medium font-mono">
+                      {a.product_name || a.product_id}
+                    </TableCell>
                     <TableCell className="font-mono text-xs">{a.sku}</TableCell>
                     <TableCell
                       className={`text-end font-mono tabular-nums ${a.current_stock === 0 ? "text-destructive" : "text-warning"}`}
@@ -530,8 +557,10 @@ function Dashboard() {
                       {a.current_stock}
                     </TableCell>
                     <TableCell className="text-end text-muted-foreground">{a.threshold}</TableCell>
-                    {/* BE stock_alerts carries no last-sold timestamp (ENTRY 015). */}
-                    <TableCell className="text-end text-xs text-muted-foreground">—</TableCell>
+                    {/* Latest OrderItems order created_at for this variant (ENTRY 015). */}
+                    <TableCell className="text-end text-xs text-muted-foreground">
+                      {fmtRelative(a.last_sold_at)}
+                    </TableCell>
                     <TableCell className="text-end">
                       <Button size="sm" variant="ghost" asChild>
                         <Link to="/products/$id/edit" params={{ id: a.product_id }}>
@@ -552,8 +581,10 @@ function Dashboard() {
                 <h3 className="font-display text-base font-semibold">{t("dashboard.wallet")}</h3>
                 <Wallet className="h-4 w-4 text-muted-foreground" />
               </div>
-              {/* Period balance has no BE field (P3 wallet exposes flows only, ENTRY 016). */}
-              <p className="font-display text-3xl font-bold tabular-nums">—</p>
+              {/* Current wallet balance for the scope (ENTRY 016). */}
+              <p className="font-display text-3xl font-bold tabular-nums">
+                {fmtMoney(walletQuery.data?.wallet_balance ?? o?.wallet_balance)}
+              </p>
               <p className="mt-1 text-xs text-muted-foreground">{t("dashboard.walletBalance")}</p>
               <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
                 <div className="rounded-lg border bg-background/40 p-2.5">
@@ -590,29 +621,29 @@ function Dashboard() {
                 <AttentionItem
                   icon={RotateCcw}
                   label={t("dashboard.attnReturns")}
-                  count={o?.returns_count ?? 0}
+                  count={o?.attention?.pending_returns_count ?? o?.returns_count ?? 0}
                   to="/returns"
                 />
                 <AttentionItem
                   icon={AlertTriangle}
                   label={t("dashboard.attnLowStock")}
-                  count={o?.stock_alerts?.length ?? 0}
+                  count={o?.attention?.low_stock_count ?? o?.stock_alerts?.length ?? 0}
                   to="/products"
                 />
-                {/* Support sessions awaiting reply: no P3 dashboard field (ENTRY 017). */}
+                {/* Support sessions awaiting a staff reply (ENTRY 017). */}
                 <AttentionItem
                   icon={MessageSquare}
                   label={t("dashboard.attnSupport")}
-                  count={0}
+                  count={o?.attention?.support_awaiting_count ?? 0}
                   to="/support"
                 />
                 {/* Identity reviews pending — hidden for STORE; needs stores.review_identity.
-                    No P3 dashboard count field; static placeholder (ENTRY 017). */}
+                    Count present only for reviewers (ENTRY 017). */}
                 {canIdentityReview && (
                   <AttentionItem
                     icon={FileWarning}
                     label={t("dashboard.attnIdentity")}
-                    count={0}
+                    count={o?.attention?.identity_review_pending_count ?? 0}
                     to="/stores"
                   />
                 )}
@@ -626,21 +657,18 @@ function Dashboard() {
                 </h3>
                 <Truck className="h-4 w-4 text-muted-foreground" />
               </div>
-              {/* Top couriers (fee/ETA/success-rate) is not part of the P3 dashboard
-                  contract — courier analytics arrive with P6. Static placeholder (ENTRY 017). */}
+              {/* Top couriers by delivered-order volume, with fee / ETA / success
+                  metric (ENTRY 017). */}
               <ul className="space-y-2.5 text-sm">
-                {[
-                  { name: "Aramex", fee: "$4.20", eta: "2d", rate: "98%" },
-                  { name: "Bosta", fee: "$3.80", eta: "1d", rate: "96%" },
-                  { name: "Wakilni", fee: "$5.10", eta: "1d", rate: "94%" },
-                ].map((c) => (
+                {(o?.top_couriers ?? []).map((c) => (
                   <li
-                    key={c.name}
+                    key={c.courier_id}
                     className="flex items-center justify-between rounded-lg border bg-background/40 p-2.5"
                   >
                     <span className="text-sm font-medium">{c.name}</span>
                     <span className="font-mono text-xs text-muted-foreground">
-                      {c.fee} · {c.eta} · {c.rate}
+                      {fmtMoney(c.base_fee)} · {c.eta}d
+                      {c.success_rate != null ? ` · ${fmtPct(c.success_rate)}` : ""}
                     </span>
                   </li>
                 ))}
@@ -658,11 +686,10 @@ function Dashboard() {
                 <Link to="/orders">{t("dashboard.viewAll")} →</Link>
               </Button>
             </div>
-            {/* Recent-orders list is not part of the P3 dashboard contract (overview /
-                timeseries / funnel / wallet only); the orders surface arrives in P5.
-                Static placeholder until then (ENTRY 017). */}
+            {/* Live recent orders for the scope (last 10), mapped to the frozen
+                row shape (ENTRY 017). */}
             <div className="divide-y">
-              {RECENT_ORDERS_PLACEHOLDER.map((row) => (
+              {recentOrderRows.map((row) => (
                 <div key={row.id} className="flex items-center gap-4 px-5 py-3.5">
                   <Avatar className="h-9 w-9">
                     <AvatarFallback className="bg-muted text-xs">
@@ -712,45 +739,17 @@ function Dashboard() {
                   <TableHead></TableHead>
                 </TableRow>
               </TableHeader>
-              {/* Pending-returns list is not part of the P3 dashboard contract;
-                  the returns surface arrives in P5. Static placeholder (ENTRY 017). */}
+              {/* Live pending (in-flight) returns for the scope (ENTRY 017). */}
               <TableBody>
-                {[
-                  {
-                    rn: "RT-201",
-                    on: "MX-4488",
-                    item: "Saffron Threads",
-                    reason: "Damaged",
-                    at: "1h ago",
-                  },
-                  {
-                    rn: "RT-200",
-                    on: "MX-4475",
-                    item: "Olive Oil 1L",
-                    reason: "Wrong item",
-                    at: "4h ago",
-                  },
-                  {
-                    rn: "RT-199",
-                    on: "MX-4462",
-                    item: "Pistachio Halva",
-                    reason: "Late delivery",
-                    at: "1d ago",
-                  },
-                  {
-                    rn: "RT-198",
-                    on: "MX-4458",
-                    item: "Sumac Powder",
-                    reason: "Customer changed mind",
-                    at: "2d ago",
-                  },
-                ].map((r) => (
-                  <TableRow key={r.rn}>
-                    <TableCell className="font-mono text-xs">{r.rn}</TableCell>
-                    <TableCell className="font-mono text-xs">{r.on}</TableCell>
+                {(o?.pending_returns ?? []).map((r) => (
+                  <TableRow key={r.return_id}>
+                    <TableCell className="font-mono text-xs">{r.return_number}</TableCell>
+                    <TableCell className="font-mono text-xs">{r.order_number}</TableCell>
                     <TableCell className="text-sm">{r.item}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">{r.reason}</TableCell>
-                    <TableCell className="text-end text-xs text-muted-foreground">{r.at}</TableCell>
+                    <TableCell className="text-end text-xs text-muted-foreground">
+                      {fmtRelative(r.requested_at)}
+                    </TableCell>
                     <TableCell className="text-end">
                       <Button size="sm" variant="ghost" asChild>
                         <Link to="/returns">{t("dashboard.review")}</Link>
@@ -766,32 +765,6 @@ function Dashboard() {
     </div>
   );
 }
-
-// Static recent-orders rows. The recent-orders list is NOT part of the P3
-// dashboard contract (overview / timeseries / funnel / wallet only); the orders
-// surface is wired in P5. Until then this placeholder keeps the frozen UI
-// intact. Logged as ENTRY 017 in required_adminpanel_change.md.
-const RECENT_ORDERS_PLACEHOLDER: {
-  id: string;
-  number: string;
-  customer: string;
-  store: string;
-  total: number;
-  status: string;
-  items: number;
-  placed: string;
-}[] = [
-  {
-    id: "ph_1",
-    number: "MX-—",
-    customer: "—",
-    store: "—",
-    total: 0,
-    status: "PENDING",
-    items: 0,
-    placed: "—",
-  },
-];
 
 // --- formatting helpers (decimal money fields arrive as strings) ---
 
@@ -818,6 +791,21 @@ function fmtPct(v: number | null | undefined): string {
 function fmtRating(v: number | null | undefined): string {
   if (v === null || v === undefined) return "—";
   return v.toFixed(1);
+}
+
+// Compact relative time for ISO datetimes ("3h ago", "2d ago"); "—" when null.
+function fmtRelative(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "—";
+  const diffMs = Date.now() - then;
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
 }
 
 // Convert a fractional period-over-period delta (e.g. 0.182 = +18.2%) into the
