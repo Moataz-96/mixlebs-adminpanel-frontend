@@ -21,7 +21,8 @@ export const Route = createFileRoute("/_panel/account/devices")({
 });
 
 // Frozen-UI local row shape (was mock DeviceTokenRow). Mapped from the BE
-// DeviceToken; `label`/`created_at` are not on the schema (ENTRY 030).
+// DeviceToken; `label` is BE-derived and `created_at` is BE-supplied (null
+// until mixlebs_core adds a DeviceToken timestamp — ENTRY 030(a)).
 type DeviceType = "IOS" | "ANDROID" | "WEB";
 interface DeviceTokenRow {
   id: string;
@@ -42,9 +43,9 @@ function mapDevice(d: AdminDeviceToken): DeviceTokenRow {
   return {
     id: String(d.id),
     device_type: normType(d.device_type),
-    label: d.token,
+    label: d.label || d.token,
     is_valid: d.is_valid,
-    created_at: "",
+    created_at: d.created_at ?? "",
   };
 }
 

@@ -43,6 +43,11 @@ export interface AdminStoreListItem {
   returns: boolean;
   chat: boolean;
   asset_sharing: boolean;
+  // ENTRY 025 derived columns (annotated on the BE; no N+1).
+  vendor_name: string | null;
+  products_count: number;
+  orders_count: number;
+  created_at: string | null;
 }
 
 const listInput = z
@@ -123,6 +128,11 @@ export interface AdminStoreDetail {
   chat: boolean;
   asset_sharing: boolean;
   categories: number[];
+  // ENTRY 025 derived columns.
+  vendor_name: string | null;
+  products_count: number;
+  orders_count: number;
+  created_at: string | null;
   info: Record<string, StoreInfoLocale>;
   working_days: StoreWorkingDay[];
   identity_summary: StoreIdentitySummary;
@@ -171,6 +181,20 @@ const storeUpdateInput = z.object({
         day: z.string(),
         start_time: z.string(),
         end_time: z.string(),
+      }),
+    )
+    .optional(),
+  // ENTRY 026 — per-locale StoreInfo translation upserts. Each row keys an
+  // existing (store, language) row by language_code; text fields are partial.
+  info: z
+    .array(
+      z.object({
+        language_code: z.string(),
+        name: z.string().optional(),
+        about: z.string().optional(),
+        features: z.string().optional(),
+        target_audience: z.string().optional(),
+        selling_promotions: z.string().optional(),
       }),
     )
     .optional(),

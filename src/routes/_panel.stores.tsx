@@ -94,14 +94,15 @@ function mapStore(s: AdminStoreListItem): StoreRow {
     status: s.status,
     account_type: s.account_type,
     rank: s.rank,
-    vendor: null,
+    // CLOSES ENTRY 025 — derived columns now supplied by the BE.
+    vendor: s.vendor_name,
     order_online: s.order_online,
     returns: s.returns,
     chat: s.chat,
     asset_sharing: s.asset_sharing,
-    products: 0,
-    orders: 0,
-    created_at: "",
+    products: s.products_count ?? 0,
+    orders: s.orders_count ?? 0,
+    created_at: (s.created_at ?? "").slice(0, 10),
     about: "",
   };
 }

@@ -40,7 +40,7 @@ import { parseServerError } from "@/lib/api/error";
 import { listCustomers, blockReturns, type AdminCustomer } from "@/lib/api/customers.functions";
 
 // Frozen-UI local row shape (was mock CustomerRow). Mapped from BE Customer;
-// orders / total_spent are not on the Customer schema (ENTRY 025) -> 0.
+// orders / total_spent / wallet_balance are now BE-supplied (CLOSES ENTRY 025).
 type Gender = "MALE" | "FEMALE" | "OTHER";
 interface CustomerRow {
   id: string;
@@ -64,11 +64,11 @@ function mapCustomer(c: AdminCustomer): CustomerRow {
     phone: c.phone ?? "",
     gender: (c.gender ?? "OTHER") as Gender,
     dob: c.dob ?? "",
-    orders: 0,
-    total_spent: 0,
-    wallet_balance: Number(c.wallet) || 0,
+    orders: c.orders_count ?? 0,
+    total_spent: Number(c.total_spent) || 0,
+    wallet_balance: Number(c.wallet_balance ?? c.wallet) || 0,
     is_return_blocked: c.is_return_blocked,
-    date_joined: (c.date_joined ?? "").slice(0, 10),
+    date_joined: (c.date_joined ?? c.created_at ?? "").slice(0, 10),
   };
 }
 

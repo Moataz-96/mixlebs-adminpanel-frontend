@@ -34,9 +34,10 @@ export const Route = createFileRoute("/_panel/customers/$id")({
   component: CustomerDetail,
 });
 
-// Frozen-UI local row shape. Mapped from BE Customer; orders/total_spent are not
-// on the schema (ENTRY 025). Per-customer orders/returns/reviews/devices/audit
-// have no P7 administration endpoints (ENTRY 029) — those tabs render empty.
+// Frozen-UI local row shape. Mapped from BE Customer; orders/total_spent/
+// wallet_balance are now BE-supplied (CLOSES ENTRY 025). Per-customer
+// orders/returns/reviews/devices/audit have no P7 administration endpoints
+// (ENTRY 029) — those tabs render empty.
 interface CustomerRow {
   id: string;
   name: string;
@@ -59,11 +60,11 @@ function mapCustomer(c: AdminCustomer): CustomerRow {
     phone: c.phone ?? "",
     gender: (c.gender ?? "OTHER") as CustomerRow["gender"],
     dob: c.dob ?? "",
-    orders: 0,
-    total_spent: 0,
-    wallet_balance: Number(c.wallet) || 0,
+    orders: c.orders_count ?? 0,
+    total_spent: Number(c.total_spent) || 0,
+    wallet_balance: Number(c.wallet_balance ?? c.wallet) || 0,
     is_return_blocked: c.is_return_blocked,
-    date_joined: (c.date_joined ?? "").slice(0, 10),
+    date_joined: (c.date_joined ?? c.created_at ?? "").slice(0, 10),
   };
 }
 

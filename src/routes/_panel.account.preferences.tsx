@@ -26,7 +26,9 @@ import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n";
 import { parseServerError } from "@/lib/api/error";
 import { getPreferences, updatePreferences } from "@/lib/api/account.functions";
-import { PREF_LOCATIONS, PREF_LANGUAGES, PREF_TIMEZONES } from "@/lib/constants";
+import { listCourierLocations } from "@/lib/api/couriers.functions";
+import { listLanguages } from "@/lib/api/locations.functions";
+import { PREF_TIMEZONES } from "@/lib/constants";
 
 export const Route = createFileRoute("/_panel/account/preferences")({
   head: () => ({ meta: [{ title: "Preferences — Mixlebs Admin" }] }),
@@ -64,6 +66,22 @@ function PreferencesPage() {
     staleTime: 30 * 1000,
     retry: false,
   });
+
+  // CLOSES ENTRY 028 — Location / Language pickers source from the real BE
+  // lookups (region-scoped composite Location list + P8 languages) instead of
+  // the prior static constants.
+  const locationsQuery = useQuery({
+    queryKey: ["pref-location-lookup"],
+    queryFn: () => listCourierLocations({ data: { page_size: 200 } }),
+    staleTime: 5 * 60 * 1000,
+  });
+  const languagesQuery = useQuery({
+    queryKey: ["pref-language-lookup"],
+    queryFn: () => listLanguages(),
+    staleTime: 5 * 60 * 1000,
+  });
+  const locationOptions = locationsQuery.data?.results ?? [];
+  const languageOptions = languagesQuery.data?.results ?? [];
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
@@ -171,9 +189,10 @@ function PreferencesPage() {
                       <SelectValue placeholder={t("account.selectLocation")} />
                     </SelectTrigger>
                     <SelectContent>
-                      {PREF_LOCATIONS.map((l) => (
-                        <SelectItem key={l.id} value={l.id}>
-                          {l.label}
+                      {locationOptions.map((l) => (
+                        <SelectItem key={l.id} value={String(l.id)}>
+                          {[l.country_name, l.city_name].filter(Boolean).join(" · ") ||
+                            `#${l.id}`}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -237,9 +256,9 @@ function PreferencesPage() {
                       <SelectValue placeholder={t("account.selectLanguage")} />
                     </SelectTrigger>
                     <SelectContent>
-                      {PREF_LANGUAGES.map((l) => (
-                        <SelectItem key={l.id} value={l.id}>
-                          {l.label}
+                      {languageOptions.map((l) => (
+                        <SelectItem key={l.id} value={String(l.id)}>
+                          {l.name}
                         </SelectItem>
                       ))}
                     </SelectContent>

@@ -39,6 +39,10 @@ export interface AdminDeviceToken {
   device_type: string | null;
   endpoint_arn: string;
   is_valid: boolean;
+  // ENTRY 030(a): derived human-readable label. `created_at` is null until
+  // mixlebs_core grows a DeviceToken creation timestamp (genuine core gap).
+  label: string;
+  created_at: string | null;
 }
 
 const listInput = z

@@ -81,6 +81,8 @@ import {
   updateAddress,
   type AdminAddress,
 } from "@/lib/api/addresses.functions";
+import { listPaymentMethods } from "@/lib/api/payment_methods.functions";
+import { listCourierLocations } from "@/lib/api/couriers.functions";
 
 // Frozen-UI local types (were imported from mock/people).
 type StoreStatus =
@@ -130,13 +132,14 @@ function mapDetail(d: AdminStoreDetail): StoreRow {
     status: d.status,
     account_type: d.account_type,
     rank: d.rank,
-    vendor: null,
+    // ENTRY 025 — derived columns now supplied by the BE.
+    vendor: d.vendor_name,
     order_online: d.order_online,
     returns: d.returns,
     chat: d.chat,
     asset_sharing: d.asset_sharing,
-    products: 0,
-    orders: 0,
+    products: d.products_count ?? 0,
+    orders: d.orders_count ?? 0,
     about: d.info?.en?.about ?? d.info?.ar?.about ?? "",
   };
 }
@@ -339,7 +342,7 @@ function StoreDetail() {
                 <HoursTab store={store} detail={detail} onSaved={invalidate} />
               </TabsContent>
               <TabsContent value="payments" className="mt-6">
-                <PaymentsTab />
+                <PaymentsTab storeId={store.id} />
               </TabsContent>
               <TabsContent value="settings" className="mt-6">
                 <SettingsTab
@@ -406,8 +409,11 @@ function InfoTab({
   const canEdit = perms.has("stores.update");
   const adminOrStaff = perms.role !== "store";
 
-  // Editable store-level settings (the per-locale StoreInfo text is read-only on
-  // the BE StoreUpdate serializer; ENTRY 026 tracks adding StoreInfo writes).
+  // Editable store-level settings. The BE StoreUpdate serializer now accepts
+  // per-locale StoreInfo text writes (CLOSES ENTRY 026) and the updateStore
+  // data-flow carries an optional `info` array; the StoreInfo inputs below stay
+  // in the FROZEN read-only UI state, so the write path is plumbed but the
+  // visual form remains unchanged.
   const [shopName, setShopName] = useState(store.shop_name);
   const [rank, setRank] = useState(store.rank);
   const [accountType, setAccountType] = useState(store.account_type);
@@ -939,8 +945,15 @@ function AddressDialog({ storeId, onSaved }: { storeId: string; onSaved: () => v
       note: "",
     },
   });
-  // The location picker options come from the BE locations lookup (P8); until
-  // wired here, the picker is a static placeholder set (ENTRY 028).
+  // CLOSES ENTRY 028 — the location picker options come from the region-scoped
+  // composite Location lookup (reuses the courier locations endpoint, whose
+  // `id` IS the Location id the address write expects).
+  const locationsQuery = useQuery({
+    queryKey: ["admin-location-lookup"],
+    queryFn: () => listCourierLocations({ data: { page_size: 200 } }),
+    staleTime: 5 * 60 * 1000,
+  });
+  const locationOptions = locationsQuery.data?.results ?? [];
   async function onSubmit(values: AddressValues) {
     try {
       await createAddress({
@@ -994,12 +1007,15 @@ function AddressDialog({ storeId, onSaved }: { storeId: string; onSaved: () => v
               onValueChange={(v) => setValue("location_id", v, { shouldValidate: true })}
             >
               <SelectTrigger>
-                <SelectValue placeholder="LB · Beirut · Achrafieh" />
+                <SelectValue placeholder={t("people.stores.addrLocation")} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="loc_01">LB · Beirut · Achrafieh</SelectItem>
-                <SelectItem value="loc_02">LB · Beirut · Hamra</SelectItem>
-                <SelectItem value="loc_03">LB · Tripoli · El Mina</SelectItem>
+                {locationOptions.map((loc) => (
+                  <SelectItem key={loc.id} value={String(loc.id)}>
+                    {[loc.country_name, loc.city_name].filter(Boolean).join(" · ") ||
+                      `#${loc.id}`}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
             {errors.location_id && (
@@ -1193,14 +1209,21 @@ function HoursTab({
 
 // ── Tab 5 — Payment methods ──────────────────────────────────────────────────
 // Per-store payment methods live under the Phase 6 /payment-methods surface
-// (already wired in P6); this tab is a navigational card pointing there. There
-// is no store-scoped payment-method list endpoint in the P7 administration BE
-// (ENTRY 027), so the inline preview table renders empty until P6's list is
-// surfaced here.
-function PaymentsTab() {
+// (CLOSES ENTRY 027). The tab reuses the P6 store-scoped list endpoint
+// (GET /payment-methods/?store_id=) — no duplicate P7 endpoint — and renders the
+// store owner's real payment methods inline; the card still links to the full
+// P6 management screen.
+function PaymentsTab({ storeId }: { storeId: string }) {
   const t = useT();
-  const rows: { id: string; brand: string; holder_name: string; exp_month: number; exp_year: number; is_default: boolean }[] =
-    [];
+  const perms = usePermissions();
+  const canView = perms.has("payment_methods.view");
+  const listQuery = useQuery({
+    queryKey: ["admin-store-payment-methods", storeId],
+    queryFn: () => listPaymentMethods({ data: { store_id: storeId, page_size: 50 } }),
+    enabled: canView,
+    staleTime: 30 * 1000,
+  });
+  const rows = listQuery.data?.results ?? [];
   return (
     <Card className="border-0 bg-card p-6 shadow-soft">
       <div className="mb-4 flex items-center justify-between">

@@ -25,7 +25,12 @@ export interface AdminCustomer {
   is_return_blocked: boolean;
   is_active: boolean;
   wallet: string;
+  // ENTRY 025 derived columns (annotated on the BE; no N+1).
+  wallet_balance: string;
+  total_spent: string;
+  orders_count: number;
   date_joined: string;
+  created_at: string;
   last_login: string | null;
 }
 
