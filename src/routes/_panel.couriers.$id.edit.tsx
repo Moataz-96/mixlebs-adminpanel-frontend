@@ -16,10 +16,14 @@ import {
   createCourier,
   updateCourier,
   listDeliveryAreas,
+  addDeliveryArea,
   removeDeliveryArea,
+  setDefaultDeliveryArea,
+  listCourierLocations,
   type Courier,
   type DeliveryArea,
 } from "@/lib/api/couriers.functions";
+import { listRegions } from "@/lib/api/locations.functions";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -47,18 +51,11 @@ export const Route = createFileRoute("/_panel/couriers/$id/edit")({
   component: EditCourier,
 });
 
-// ENTRY 008: region / locations pickers stay STATIC placeholders. Phase 6 has no
-// admin Location/Region lookup endpoint wired (those land in Phase 8), so the
-// region combobox + locations chip input are decorative until then; the form
-// submits only the scalar courier fields (name / rank / eta / base_fee). The
-// `region_id` / `location_ids` write fields exist in the server fn and will be
-// hooked up once the lookup endpoints are wired in Phase 8.
-const REGIONS = [
-  { id: "reg_lb", name: "Lebanon" },
-  { id: "reg_ae", name: "United Arab Emirates" },
-  { id: "reg_sa", name: "Saudi Arabia" },
-];
-const LOCATIONS = ["Beirut", "Tripoli", "Saida", "Zahle", "Jounieh", "Byblos", "Tyre", "Baalbek"];
+// ENTRY 024a (remediation): region / locations pickers are now backed by live
+// lookups — Region from P8 (/admin/locations/regions/) and Location from the
+// region-scoped /couriers/locations/ endpoint. The form persists region_id +
+// location_ids alongside the scalar courier fields. The locations chip input
+// stores Location ids (as strings); chip labels show the city/country name.
 
 const schema = z.object({
   name: z.string().min(1).max(255),
@@ -100,6 +97,43 @@ function EditCourier() {
     [areasQuery.data],
   );
 
+  // ENTRY 024a: live Region + Location lookups for the pickers.
+  const regionsQuery = useQuery({
+    queryKey: ["regions"],
+    queryFn: () => listRegions(),
+    enabled: has("couriers.update"),
+  });
+  const regions = useMemo(
+    () => (regionsQuery.data?.results ?? []).map((r) => ({ id: String(r.id), name: r.name })),
+    [regionsQuery.data],
+  );
+
+  const locationsQuery = useQuery({
+    queryKey: ["courier-locations"],
+    queryFn: () => listCourierLocations({ data: { page_size: 200 } }),
+    enabled: has("couriers.update"),
+  });
+  const locationOptions = useMemo(
+    () =>
+      (locationsQuery.data?.results ?? []).map((l) => ({
+        id: String(l.id),
+        label:
+          [l.city_name, l.country_name].filter(Boolean).join(", ") || `#${l.id}`,
+      })),
+    [locationsQuery.data],
+  );
+  const locationLabel = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const o of locationOptions) map.set(o.id, o.label);
+    return map;
+  }, [locationOptions]);
+
+  const courierLocationIds = useMemo<string[]>(() => {
+    const raw = c?.locations;
+    if (Array.isArray(raw)) return raw.map((x) => String(x));
+    return [];
+  }, [c]);
+
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     values: {
@@ -107,8 +141,8 @@ function EditCourier() {
       rank: c?.rank ?? 1,
       eta_days: c?.eta_days ?? 2,
       base_fee: num(c?.base_fee),
-      region_id: REGIONS[0].id,
-      locations: [],
+      region_id: c?.region_id != null ? String(c.region_id) : (regions[0]?.id ?? ""),
+      locations: courierLocationIds,
     },
   });
   const {
@@ -126,6 +160,20 @@ function EditCourier() {
     onError: (err) => toast.error(parseServerError(err).message),
   });
 
+  // ENTRY 024b: add + set-default delivery-area write paths (were P6 no-ops).
+  const addAreaMutation = useMutation({
+    mutationFn: (locationId: number) =>
+      addDeliveryArea({ data: { id, location_id: locationId } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["courier-areas", id] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+  const setDefaultMutation = useMutation({
+    mutationFn: (areaId: number) =>
+      setDefaultDeliveryArea({ data: { id, area_id: areaId, is_default: true } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["courier-areas", id] }),
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
   if (!has("couriers.update")) {
     return (
       <div className="p-6">
@@ -135,8 +183,9 @@ function EditCourier() {
   }
 
   async function onSubmit(values: Values) {
-    // ENTRY 008: region_id / location_ids are NOT sent (no lookup wired yet);
-    // only scalar courier fields are persisted in Phase 6.
+    // ENTRY 024a: region_id + location_ids are now persisted alongside scalars.
+    const region_id = values.region_id ? Number(values.region_id) : null;
+    const location_ids = values.locations.map((x) => Number(x)).filter((n) => Number.isFinite(n));
     try {
       if (isNew) {
         await createCourier({
@@ -145,6 +194,8 @@ function EditCourier() {
             rank: values.rank,
             eta_days: values.eta_days,
             base_fee: values.base_fee,
+            region_id,
+            location_ids,
           },
         });
       } else {
@@ -155,6 +206,8 @@ function EditCourier() {
             rank: values.rank,
             eta_days: values.eta_days,
             base_fee: values.base_fee,
+            region_id,
+            location_ids,
           },
         });
       }
@@ -179,15 +232,24 @@ function EditCourier() {
     removeAreaMutation.mutate(aid);
   }
 
-  // ENTRY 008: adding / re-defaulting a delivery area needs a Location picker
-  // (admin Location lookup, wired in Phase 8). Until then these stay no-ops so
-  // the frozen UI controls remain but cannot create dangling rows. `removeArea`
-  // is fully wired against DELETE /couriers/{id}/delivery-areas/{area_id}/.
+  // ENTRY 024b: "Add area" adds the first region Location not yet a delivery
+  // area (the frozen UI exposes no per-row location picker); set-default flips
+  // the chosen area via PATCH. Both are guarded by couriers.update BE-side.
   function addArea() {
-    toast.info(t("finance.couriers.daEmpty"));
+    if (isNew) {
+      toast.info(t("finance.couriers.daEmpty"));
+      return;
+    }
+    const used = new Set(areas.map((a) => a.location_id));
+    const next = locationOptions.find((o) => !used.has(Number(o.id)));
+    if (!next) {
+      toast.info(t("finance.couriers.daEmpty"));
+      return;
+    }
+    addAreaMutation.mutate(Number(next.id));
   }
-  function setDefaultArea(_aid: number) {
-    /* no-op placeholder — BE delivery-area PATCH not exposed in Phase 6 */
+  function setDefaultArea(aid: number) {
+    setDefaultMutation.mutate(aid);
   }
 
   return (
@@ -276,7 +338,7 @@ function EditCourier() {
                         <SelectValue placeholder={t("finance.couriers.regionPlaceholder")} />
                       </SelectTrigger>
                       <SelectContent>
-                        {REGIONS.map((r) => (
+                        {regions.map((r) => (
                           <SelectItem key={r.id} value={r.id}>
                             {r.name}
                           </SelectItem>
@@ -310,25 +372,27 @@ function EditCourier() {
                                 variant="outline"
                                 className="cursor-pointer border-primary/40 bg-primary/10 text-primary"
                               >
-                                {l} ×
+                                {locationLabel.get(l) ?? `#${l}`} ×
                               </Badge>
                             </button>
                           ))}
                         </div>
                       )}
                       <div className="flex flex-wrap gap-1.5">
-                        {LOCATIONS.filter((l) => !field.value.includes(l)).map((l) => (
-                          <button
-                            type="button"
-                            key={l}
-                            onClick={() => field.onChange([...field.value, l])}
-                          >
-                            <Badge variant="outline" className="cursor-pointer">
-                              <Plus className="me-1 h-3 w-3" />
-                              {l}
-                            </Badge>
-                          </button>
-                        ))}
+                        {locationOptions
+                          .filter((o) => !field.value.includes(o.id))
+                          .map((o) => (
+                            <button
+                              type="button"
+                              key={o.id}
+                              onClick={() => field.onChange([...field.value, o.id])}
+                            >
+                              <Badge variant="outline" className="cursor-pointer">
+                                <Plus className="me-1 h-3 w-3" />
+                                {o.label}
+                              </Badge>
+                            </button>
+                          ))}
                       </div>
                     </div>
                   </Fld>
@@ -363,7 +427,9 @@ function EditCourier() {
                 <TableBody>
                   {areas.map((a) => (
                     <TableRow key={a.id}>
-                      <TableCell className="font-medium">#{a.location_id}</TableCell>
+                      <TableCell className="font-medium">
+                        {locationLabel.get(String(a.location_id)) ?? `#${a.location_id}`}
+                      </TableCell>
                       <TableCell className="text-center">
                         {a.is_default ? (
                           <Badge

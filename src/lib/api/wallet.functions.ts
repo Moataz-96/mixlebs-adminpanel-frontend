@@ -11,14 +11,15 @@
 // wallet.view_own scopes to the caller's own wallet (user_id omitted). STORE/
 // STAFF passing another user_id requires wallet.view_any (enforced BE-side).
 //
-// ENTRY 008: the BE has no per-transaction `balance_after` column and no wallet
-// adjustment write endpoint — the §9.6 "Balance after" column + "Adjustments"
-// tab stay as static placeholders (logged in required_adminpanel_change.md).
+// ENTRY 023 (remediation): the BE now computes a per-transaction `balance_after`
+// (running balance, no core column) and exposes a wallet-adjustment write
+// endpoint (POST /wallet/adjustments/, gated by wallet.view_any). The §9.6
+// "Balance after" column + "Adjustments" tab are wired against them here.
 
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
-import { apiGet } from "./_client";
+import { apiGet, apiPost } from "./_client";
 import { toClientError } from "./error";
 
 export interface Page<T> {
@@ -52,6 +53,9 @@ export interface WalletTransaction {
   type: WalletTxType;
   label: string;
   amount: string;
+  // ENTRY 023a: computed running balance after this transaction (string DRF
+  // Decimal); null when no history exists.
+  balance_after: string | null;
   created_at: string | null;
 }
 
@@ -100,6 +104,29 @@ export const listWalletTransactions = createServerFn({ method: "GET" })
           page_size: data?.page_size,
         })}`,
       );
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+// --------------------------------------------------------------------------- //
+// adjustWallet — POST /api/admin/v1/wallet/adjustments/ (ENTRY 023b).
+// Creates a credit/debit WalletTransaction and moves Wallet.balance. Admin-only
+// (wallet.view_any) — enforced BE-side. Returns the created transaction with its
+// computed `balance_after`.
+// --------------------------------------------------------------------------- //
+export const adjustWallet = createServerFn({ method: "POST" })
+  .inputValidator(
+    (d: { user_id: string; type: "credit" | "debit"; amount: string | number; label: string }) => d,
+  )
+  .handler(async ({ data }) => {
+    try {
+      return await apiPost<WalletTransaction>("/api/admin/v1/wallet/adjustments/", {
+        user_id: data.user_id,
+        type: data.type,
+        amount: String(data.amount),
+        label: data.label,
+      });
     } catch (err) {
       throw toClientError(err);
     }

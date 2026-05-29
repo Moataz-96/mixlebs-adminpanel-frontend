@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -23,10 +23,12 @@ import { PageStates, TableSkeleton } from "@/components/shared/states";
 import { usePageState, type PageState } from "@/lib/page-state";
 import { useT } from "@/lib/i18n";
 import {
+  adjustWallet,
   getWalletSummary,
   listWalletTransactions,
   type WalletTransaction,
 } from "@/lib/api/wallet.functions";
+import { parseServerError } from "@/lib/api/error";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -46,8 +48,9 @@ export const Route = createFileRoute("/_panel/wallet")({
 });
 
 // Frozen-UI row shape (was imported from mock/finance). Mapped from the BE
-// WalletTransaction. ENTRY 008: the BE has no per-row `balance_after` and no
-// related-order/return ref, so those columns render static placeholders.
+// WalletTransaction. ENTRY 023: the BE now computes a per-row `balance_after`
+// (running balance); the related-order/return ref still has no BE source so
+// that column renders a static placeholder.
 interface WalletTxRow {
   id: string;
   date: string;
@@ -71,7 +74,7 @@ function mapTx(tx: WalletTransaction): WalletTxRow {
     type: tx.type === "credit" ? "CREDIT" : "DEBIT",
     label: tx.label,
     amount: num(tx.amount),
-    balance_after: 0, // ENTRY 008: not exposed by the BE.
+    balance_after: num(tx.balance_after), // ENTRY 023: computed running balance.
   };
 }
 
@@ -294,7 +297,7 @@ function WalletPage() {
           {canAdjust && (
             <TabsContent value="adjustments" className="mt-5">
               <Can perm="wallet.view_any" fallback={null}>
-                <AdjustmentForm />
+                <AdjustmentForm userId={summary?.user_id} />
               </Can>
             </TabsContent>
           )}
@@ -310,8 +313,9 @@ const adjSchema = z.object({
 });
 type AdjValues = z.infer<typeof adjSchema>;
 
-function AdjustmentForm() {
+function AdjustmentForm({ userId }: { userId?: string }) {
   const t = useT();
+  const queryClient = useQueryClient();
   const {
     register,
     handleSubmit,
@@ -322,15 +326,29 @@ function AdjustmentForm() {
     defaultValues: { amount: 0, label: "" },
   });
 
+  const mutation = useMutation({
+    mutationFn: (vars: { type: "credit" | "debit"; amount: number; label: string }) =>
+      adjustWallet({
+        data: { user_id: userId!, type: vars.type, amount: vars.amount, label: vars.label },
+      }),
+    onSuccess: (_data, vars) => {
+      void queryClient.invalidateQueries({ queryKey: ["wallet"] });
+      const key =
+        vars.type === "credit" ? "finance.wallet.adjCredited" : "finance.wallet.adjDebited";
+      toast.success(t(key, { amount: `$${vars.amount.toFixed(2)}` }));
+    },
+    onError: (err) => toast.error(parseServerError(err).message),
+  });
+
+  function submit(type: "credit" | "debit") {
+    if (!userId) return;
+    handleSubmit((v) => mutation.mutate({ type, amount: Number(v.amount), label: v.label }))();
+  }
   function credit() {
-    handleSubmit((v) =>
-      toast.success(t("finance.wallet.adjCredited", { amount: `$${Number(v.amount).toFixed(2)}` })),
-    )();
+    submit("credit");
   }
   function debit() {
-    handleSubmit((v) =>
-      toast.success(t("finance.wallet.adjDebited", { amount: `$${Number(v.amount).toFixed(2)}` })),
-    )();
+    submit("debit");
   }
 
   return (

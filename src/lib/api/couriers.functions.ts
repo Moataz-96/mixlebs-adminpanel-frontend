@@ -60,6 +60,18 @@ export interface DeliveryArea {
   created_at: string | null;
 }
 
+// ENTRY 024a: region-scoped Location lookup for the editor's Location picker
+// (the courier `location_ids` M2M + DeliveryArea.location FK point at these).
+export interface CourierLocation {
+  id: number;
+  country_id: number;
+  city_id: number;
+  country_name: string | null;
+  city_name: string | null;
+  region_id: number | null;
+  is_enabled: boolean;
+}
+
 function toWriteBody(d: Partial<CourierWriteInput>): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   if (d.name !== undefined) body.name = d.name;
@@ -190,6 +202,23 @@ export const addDeliveryArea = createServerFn({ method: "POST" })
   });
 
 // --------------------------------------------------------------------------- //
+// setDefaultDeliveryArea — PATCH /couriers/{id}/delivery-areas/{area_id}/ (024b).
+// Marks an area as the default (clears other defaults BE-side).
+// --------------------------------------------------------------------------- //
+export const setDefaultDeliveryArea = createServerFn({ method: "POST" })
+  .inputValidator((d: { id: string; area_id: number | string; is_default?: boolean }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiPatch<DeliveryArea>(
+        `/api/admin/v1/couriers/${data.id}/delivery-areas/${data.area_id}/`,
+        { is_default: data.is_default ?? true },
+      );
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+// --------------------------------------------------------------------------- //
 // removeDeliveryArea — DELETE /couriers/{id}/delivery-areas/{area_id}/.
 // --------------------------------------------------------------------------- //
 export const removeDeliveryArea = createServerFn({ method: "POST" })
@@ -198,6 +227,29 @@ export const removeDeliveryArea = createServerFn({ method: "POST" })
     try {
       return await apiDelete<null>(
         `/api/admin/v1/couriers/${data.id}/delivery-areas/${data.area_id}/`,
+      );
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+// --------------------------------------------------------------------------- //
+// listCourierLocations — GET /couriers/locations/ (ENTRY 024a). Region-scoped
+// Location lookup for the editor's Location / delivery-area pickers.
+// --------------------------------------------------------------------------- //
+export const listCourierLocations = createServerFn({ method: "GET" })
+  .inputValidator(
+    z
+      .object({ q: z.string().optional(), page_size: z.number().optional() })
+      .optional(),
+  )
+  .handler(async ({ data }) => {
+    try {
+      return await apiGet<Page<CourierLocation>>(
+        `/api/admin/v1/couriers/locations/${qs({
+          q: data?.q,
+          page_size: data?.page_size,
+        })}`,
       );
     } catch (err) {
       throw toClientError(err);
