@@ -42,8 +42,10 @@ import {
   createCategory,
   listProperties,
   listCategoryProperties,
+  listCategoryPropertyLogs,
   type CategoryItem,
   type CategoryPropertyItem,
+  type CategoryPropertyLogItem,
   type PropertyItem,
   type Page,
 } from "@/lib/api/catalog.functions";
@@ -67,10 +69,22 @@ interface CategoryNode {
   }[];
 }
 
-// The property-suggestion log has no BE endpoint — rendered empty (static
-// placeholder) until the BE exposes it; see required_adminpanel_change.md.
-const CATEGORY_SUGGESTION_LOG: { id: string; property: string; suggested_by: string; at: string }[] =
-  [];
+// ENTRY 021: the property-suggestion log is now sourced from the BE
+// (categories/{id}/property-logs/). Row shape the detail pane renders.
+interface SuggestionLogRow {
+  id: string;
+  property: string;
+  suggested_by: string;
+  at: string;
+}
+function mapSuggestionLog(l: CategoryPropertyLogItem): SuggestionLogRow {
+  return {
+    id: String(l.id),
+    property: l.property_key,
+    suggested_by: l.user_name ?? l.user_email ?? "—",
+    at: l.created_at ? l.created_at.slice(0, 10) : "",
+  };
+}
 
 function unpage<T>(p: Page<T> | T[] | undefined): T[] {
   if (!p) return [];
@@ -350,6 +364,16 @@ function CategoryDetail({
     queryFn: () => listProperties(),
     staleTime: 60 * 1000,
   });
+  // ENTRY 021: the property-suggestion log for this category.
+  const logsQuery = useQuery({
+    queryKey: ["categories", node.id, "property-logs"],
+    queryFn: () => listCategoryPropertyLogs({ data: { categoryId: Number(node.id) } }),
+    staleTime: 30 * 1000,
+  });
+  const suggestionLog = useMemo<SuggestionLogRow[]>(
+    () => unpage<CategoryPropertyLogItem>(logsQuery.data).map(mapSuggestionLog),
+    [logsQuery.data],
+  );
   const [props, setProps] = useState(node.properties);
   useEffect(() => {
     const live = unpage<CategoryPropertyItem>(propsQuery.data).map((cp) => ({
@@ -581,11 +605,11 @@ function CategoryDetail({
         title={t("catalog.categories.suggestionLog")}
         hint={t("catalog.categories.suggestionLogHint")}
       >
-        {CATEGORY_SUGGESTION_LOG.length === 0 ? (
+        {suggestionLog.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t("catalog.categories.noSuggestions")}</p>
         ) : (
           <ul className="space-y-1.5">
-            {CATEGORY_SUGGESTION_LOG.map((s) => (
+            {suggestionLog.map((s) => (
               <li
                 key={s.id}
                 className="flex items-center gap-2 rounded-lg bg-muted/30 px-3 py-2 text-sm"

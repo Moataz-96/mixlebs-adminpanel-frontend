@@ -29,9 +29,9 @@ import {
 } from "@/lib/api/catalog.functions";
 
 // Row shape the §7.3 reviews table consumes (was mock/products ProductReview).
-// The BE ProductReview has no reviewer display name or a hide flag (review
-// moderation is a P8 concern) — `customer` shows the customer id and `hidden`
-// is false; see required_adminpanel_change.md.
+// ENTRY 021: `customer` now shows the reviewer's name/email (resolved on the BE
+// from Customer.user), falling back to the customer id. The HIDE flag is a
+// separate genuine core gap (ENTRY 010) — `hidden` stays false here.
 interface ProductReview {
   id: string;
   customer: string;
@@ -49,7 +49,8 @@ function unpage<T>(p: Page<T> | T[] | undefined): T[] {
 function mapReview(r: ProductReviewItem): ProductReview {
   return {
     id: String(r.id),
-    customer: r.customer_id != null ? `#${r.customer_id}` : "—",
+    customer:
+      r.reviewer_name ?? r.reviewer_email ?? (r.customer_id != null ? `#${r.customer_id}` : "—"),
     rating: r.rate,
     comment: r.comment,
     isPurchased: r.is_purchased,

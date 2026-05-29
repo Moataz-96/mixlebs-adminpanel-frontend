@@ -45,9 +45,8 @@ import {
 } from "@/lib/api/catalog.functions";
 
 // Row shape the §7.7 table/editor consume (was mock/catalog PropertyRow).
-// `values` (the value list) and `used` (usage count) are aggregates the
-// /properties/ endpoint does not expose — see required_adminpanel_change.md
-// (P4 Wire). They render as static placeholders ([] / 0).
+// `values` (the value list) and `used` (usage count) are now surfaced by the
+// /properties/ endpoint (ENTRY 019) and rendered live.
 type PropDataType = "string" | "number" | "boolean" | "date";
 type PropFieldType = "text" | "select" | "multiselect" | "toggle" | "number";
 interface PropertyRow {
@@ -91,8 +90,8 @@ function mapProperty(p: PropertyItem): PropertyRow {
     is_modifiable: p.is_modifiable,
     data_type: coerceDataType(p.data_type),
     field_type: coerceFieldType(p.field_type),
-    used: 0,
-    values: [],
+    used: p.usage_count ?? 0,
+    values: (p.values ?? []).map((v) => v.value),
     translations: (p.translations ?? []).map((tr) => ({ lang: tr.language_code, label: tr.key })),
   };
 }

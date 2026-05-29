@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Tags as TagsIcon, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -16,13 +16,18 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useT } from "@/lib/i18n";
 import { usePageState } from "@/lib/page-state";
-import { listTags, type Page, type TagItem } from "@/lib/api/catalog.functions";
+import {
+  listTags,
+  createTag,
+  renameTag,
+  deleteTag,
+  type Page,
+  type TagItem,
+} from "@/lib/api/catalog.functions";
 
-// Row shape the §7.9 table consumes (was mock/catalog TagRow). `products` and
-// `store` are not surfaced by the global /tags/ list (StoreTag has no aggregate
-// product count nor a store FK on the global endpoint) — see
-// required_adminpanel_change.md (P4 Wire). They render as static placeholders
-// (0 / null) until the BE exposes them.
+// Row shape the §7.9 table consumes (was mock/catalog TagRow). The global
+// /tags/ list now aggregates distinct tag NAMES with a per-name product count
+// (ENTRY 018) and, for STAFF/admin, the owning store column.
 interface TagRow {
   id: string;
   name: string;
@@ -37,11 +42,12 @@ function unpage<T>(p: Page<T> | T[] | undefined): T[] {
 }
 
 function mapTag(t: TagItem): TagRow {
+  // The aggregated endpoint keys on (name[, store]); use that as the row id.
   return {
-    id: String(t.id),
+    id: t.store_id ? `${t.name}::${t.store_id}` : t.name,
     name: t.name,
-    products: 0,
-    store: null,
+    products: t.product_count,
+    store: t.store_name,
     created_at: t.created_at ? t.created_at.slice(0, 10) : "",
   };
 }
@@ -57,23 +63,17 @@ function TagsPage() {
   const { role } = usePermissions();
   const canSeeStore = role === "admin" || role === "staff";
 
+  const queryClient = useQueryClient();
   const tagsQuery = useQuery({
     queryKey: ["tags"],
     queryFn: () => listTags(),
     staleTime: 60 * 1000,
   });
-  const [overlay, setOverlay] = useState<TagRow[]>([]);
-  const [removed, setRemoved] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState("");
 
-  // Live /tags/ rows, plus optimistic local add/remove (global tag CRUD is not
-  // exposed by the BE — the add/remove buttons stay client-side; see
-  // required_adminpanel_change.md).
-  const rows = useMemo<TagRow[]>(() => {
-    const live = unpage(tagsQuery.data).map(mapTag);
-    return [...overlay, ...live].filter((r) => !removed.has(r.id));
-  }, [tagsQuery.data, overlay, removed]);
+  // Live aggregated /tags/ rows (name + product count + store column).
+  const rows = useMemo<TagRow[]>(() => unpage(tagsQuery.data).map(mapTag), [tagsQuery.data]);
 
   const filtered = useMemo(
     () => rows.filter((r) => r.name.toLowerCase().includes(q.toLowerCase())),
@@ -81,27 +81,37 @@ function TagsPage() {
   );
   const mostUsed = useMemo(() => [...rows].sort((a, b) => b.products - a.products)[0], [rows]);
 
+  // Global tag-name CRUD wired to the BE (ENTRY 018), gated by tags.update.
+  const createMutation = useMutation({
+    mutationFn: (name: string) => createTag({ data: { name } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["tags"] });
+      toast.success(t("catalog.tags.added"));
+    },
+    onError: () => toast.error(t("catalog.tags.added")),
+  });
+  const deleteMutation = useMutation({
+    mutationFn: (name: string) => deleteTag({ data: { name } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["tags"] });
+      toast.success(t("catalog.tags.deleted"));
+    },
+    onError: () => toast.error(t("catalog.tags.deleted")),
+  });
+  // renameTag is exported for callers that surface inline rename; kept wired so
+  // the BE rename endpoint has a typed client even though the frozen UI has no
+  // rename control yet.
+  void renameTag;
+
   function add() {
     const name = draft.trim().toLowerCase();
     if (!name || rows.some((r) => r.name === name)) return;
-    setOverlay((rs) => [
-      {
-        id: `tg_${Date.now()}`,
-        name,
-        products: 0,
-        store: null,
-        created_at: new Date().toISOString().slice(0, 10),
-      },
-      ...rs,
-    ]);
     setDraft("");
-    toast.success(t("catalog.tags.added"));
+    createMutation.mutate(name);
   }
 
   function remove(row: TagRow) {
-    setOverlay((rs) => rs.filter((r) => r.id !== row.id));
-    setRemoved((s) => new Set(s).add(row.id));
-    toast.success(t("catalog.tags.deleted"));
+    deleteMutation.mutate(row.name);
   }
 
   const columns: Column<TagRow>[] = [

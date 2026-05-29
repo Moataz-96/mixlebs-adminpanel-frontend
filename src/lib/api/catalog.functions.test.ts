@@ -133,3 +133,32 @@ describe("listCategories + listTags server fns", () => {
     expect(apiGet.mock.calls[1][0]).toContain("/api/admin/v1/tags/");
   });
 });
+
+describe("global tag CRUD server fns (ENTRY 018)", () => {
+  it("POSTs a new tag name, PATCHes a rename, and DELETEs by name", async () => {
+    const mod = await import("./catalog.functions");
+
+    apiPost.mockResolvedValueOnce({ name: "sale", product_count: 0 });
+    await (mod.createTag as unknown as Fn)({ data: { name: "sale" } });
+    expect(apiPost.mock.calls[0][0]).toBe("/api/admin/v1/tags/");
+    expect(apiPost.mock.calls[0][1]).toEqual({ name: "sale" });
+
+    apiPatch.mockResolvedValueOnce({ name: "promo", product_count: 2 });
+    await (mod.renameTag as unknown as Fn)({ data: { name: "sale", new_name: "promo" } });
+    expect(apiPatch.mock.calls[0][0]).toBe("/api/admin/v1/tags/sale/");
+    expect(apiPatch.mock.calls[0][1]).toEqual({ new_name: "promo" });
+
+    apiDelete.mockResolvedValueOnce(null);
+    await (mod.deleteTag as unknown as Fn)({ data: { name: "promo" } });
+    expect(apiDelete.mock.calls[0][0]).toBe("/api/admin/v1/tags/promo/");
+  });
+});
+
+describe("listCategoryPropertyLogs server fn (ENTRY 021)", () => {
+  it("GETs the category property-logs endpoint", async () => {
+    apiGet.mockResolvedValueOnce({ count: 0, next: null, previous: null, results: [] });
+    const mod = await import("./catalog.functions");
+    await (mod.listCategoryPropertyLogs as unknown as Fn)({ data: { categoryId: 5 } });
+    expect(apiGet.mock.calls[0][0]).toBe("/api/admin/v1/categories/5/property-logs/");
+  });
+});

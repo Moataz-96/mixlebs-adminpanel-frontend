@@ -127,7 +127,9 @@ function PropertyValuesPage() {
         id: String(v.id),
         property: keyById.get(v.property) ?? v.property_key ?? String(v.property),
         property_id: String(v.property),
-        store: v.store ? (storeNameById.get(v.store) ?? v.store) : null,
+        // ENTRY 019: BE now returns store_name directly; fall back to the local
+        // store map (then the raw id) when absent.
+        store: v.store ? (v.store_name ?? storeNameById.get(v.store) ?? v.store) : null,
         store_id: v.store ?? null,
         value: v.value,
         translations: (v.translations ?? []).map((tr) => ({

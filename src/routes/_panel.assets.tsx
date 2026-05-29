@@ -72,9 +72,10 @@ import {
 
 // Row shape the §7.10 grid/table consume (was mock/catalog AssetRow). The
 // Asset endpoint provides url / dimensions / usage_count / is_enhanced /
-// is_shared / app_field / created_at. `size_kb`, `uploaded_by`, `store`, and
-// the `used_by[]` cross-reference list are NOT surfaced by the BE — see
-// required_adminpanel_change.md (P4 Wire). They render as static placeholders.
+// is_shared / app_field / created_at, plus (ENTRY 020) a derived file size,
+// the uploader, and a used-by cross reference. `store` has NO Asset FK in core
+// (Asset.app_field is the only "bucket"); it stays null and is reported as a
+// genuine core gap.
 interface AssetRow {
   id: string;
   filename: string;
@@ -110,6 +111,25 @@ function filenameOf(a: AssetItem): string {
   }
   return `asset-${a.id}`;
 }
+// ENTRY 020: turn the BE used_by count map into the {id,label,kind} rows the
+// drawer list renders (one entry per non-zero relation kind).
+function mapUsedBy(u: AssetItem["used_by"]): AssetRow["used_by"] {
+  if (!u) return [];
+  const kinds: [keyof AssetItem["used_by"], string][] = [
+    ["product_images", "product image"],
+    ["category_icons", "category icon"],
+    ["store_avatars", "store avatar"],
+    ["communications", "communication"],
+  ];
+  return kinds
+    .filter(([k]) => (u[k] as number) > 0)
+    .map(([k, kind]) => ({
+      id: String(k),
+      kind,
+      label: `${u[k]}`,
+    }));
+}
+
 function mapAsset(a: AssetItem): AssetRow {
   const { w, h } = parseDims(a.dimensions);
   return {
@@ -118,14 +138,16 @@ function mapAsset(a: AssetItem): AssetRow {
     app_field: a.app_field,
     width: w,
     height: h,
-    size_kb: 0,
+    // ENTRY 020: file_size is bytes; the UI column is labelled KB.
+    size_kb: a.file_size != null ? Math.round(a.file_size / 1024) : 0,
     usage_count: a.usage_count,
     is_enhanced: a.is_enhanced,
     is_shared: a.is_shared,
-    uploaded_by: "—",
+    uploaded_by: a.uploaded_by_name ?? "—",
+    // Asset has no store FK in core — left null (reported core gap).
     store: null,
     created_at: a.created_at ? a.created_at.slice(0, 10) : "",
-    used_by: [],
+    used_by: mapUsedBy(a.used_by),
   };
 }
 

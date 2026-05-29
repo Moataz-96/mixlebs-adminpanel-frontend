@@ -27,6 +27,15 @@ function qs(params: Record<string, string | number | boolean | null | undefined>
   return s ? `?${s}` : "";
 }
 
+// ENTRY 020: used-by cross reference — counts of the rows pointing at the asset.
+export interface AssetUsedBy {
+  total: number;
+  product_images: number;
+  category_icons: number;
+  store_avatars: number;
+  communications: number;
+}
+
 export interface AssetItem {
   id: number;
   src: string | null;
@@ -38,6 +47,12 @@ export interface AssetItem {
   is_enhanced: boolean;
   is_shared: boolean;
   content_type: string | null;
+  // ENTRY 020: derived file size (bytes; null if backing file unavailable),
+  // uploader identity, and the used-by cross reference.
+  file_size: number | null;
+  uploaded_by: string | null;
+  uploaded_by_name: string | null;
+  used_by: AssetUsedBy;
   created_at: string;
 }
 

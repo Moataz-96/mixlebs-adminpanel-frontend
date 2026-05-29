@@ -139,7 +139,10 @@ export interface ProductTagItem {
 export interface ProductReviewItem {
   id: number;
   product: number;
-  customer_id: number;
+  customer_id: string;
+  // ENTRY 021: reviewer identity resolved from Customer.user (may be null).
+  reviewer_name: string | null;
+  reviewer_email: string | null;
   rate: number;
   comment: string;
   is_purchased: boolean;
@@ -613,6 +616,13 @@ export interface PropertyKeyTranslation {
   description: string;
 }
 
+// ENTRY 019: a property's allowed value rows (id + value + owning store).
+export interface PropertyValueRef {
+  id: number;
+  value: string;
+  store_id: string | null;
+}
+
 export interface PropertyItem {
   id: number;
   key: string;
@@ -624,6 +634,9 @@ export interface PropertyItem {
   data_type: string;
   field_type: string;
   translations: PropertyKeyTranslation[];
+  // ENTRY 019: value list + product usage count, computed on the BE.
+  values: PropertyValueRef[];
+  usage_count: number;
   created_at: string;
 }
 
@@ -637,6 +650,8 @@ export interface PropertyValueTranslation {
 export interface PropertyValueItem {
   id: number;
   store: string | null;
+  // ENTRY 019: owning store's shop_name (null for platform values).
+  store_name: string | null;
   property: number;
   property_key: string;
   value: string;
@@ -729,15 +744,19 @@ export const deletePropertyValue = createServerFn({ method: "POST" })
   });
 
 // ---------------------------------------------------------------------------
-// Tags — the global StoreTag list (read) lives under /tags/. Per-product tag
-// CRUD is the nested products/{id}/tags above.
+// Tags — global catalogue (ENTRY 018). /tags/ now aggregates distinct tag NAMES
+// with a per-name product_count and (STAFF/admin) the owning store column, plus
+// global name CRUD: POST /tags/ (create), PATCH /tags/{name}/ (rename),
+// DELETE /tags/{name}/ (delete across every visible ProductTag row). Per-product
+// tag CRUD is the nested products/{id}/tags above.
 // ---------------------------------------------------------------------------
 
 export interface TagItem {
-  id: number;
   name: string;
-  product?: number;
-  created_at?: string;
+  product_count: number;
+  store_id: string | null;
+  store_name: string | null;
+  created_at: string | null;
 }
 
 export const listTags = createServerFn({ method: "GET" })
@@ -746,6 +765,66 @@ export const listTags = createServerFn({ method: "GET" })
     try {
       const query = qs({ page: data?.page, page_size: data?.page_size, q: data?.q });
       return await apiGet<Page<TagItem> | TagItem[]>(`/api/admin/v1/tags/${query}`);
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+export const createTag = createServerFn({ method: "POST" })
+  .inputValidator((d: { name: string }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiPost<TagItem>(`/api/admin/v1/tags/`, { name: data.name });
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+export const renameTag = createServerFn({ method: "POST" })
+  .inputValidator((d: { name: string; new_name: string }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiPatch<TagItem>(`/api/admin/v1/tags/${encodeURIComponent(data.name)}/`, {
+        new_name: data.new_name,
+      });
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+export const deleteTag = createServerFn({ method: "POST" })
+  .inputValidator((d: { name: string }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiDelete<null>(`/api/admin/v1/tags/${encodeURIComponent(data.name)}/`);
+    } catch (err) {
+      throw toClientError(err);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// categories/{id}/property-logs — the property-suggestion log (ENTRY 021).
+// ---------------------------------------------------------------------------
+
+export interface CategoryPropertyLogItem {
+  id: number;
+  category: number;
+  category_property: number;
+  property_key: string;
+  user: string | null;
+  user_name: string | null;
+  user_email: string | null;
+  like_status: string;
+  created_at: string;
+}
+
+export const listCategoryPropertyLogs = createServerFn({ method: "GET" })
+  .inputValidator((d: { categoryId: number }) => d)
+  .handler(async ({ data }) => {
+    try {
+      return await apiGet<Page<CategoryPropertyLogItem> | CategoryPropertyLogItem[]>(
+        `/api/admin/v1/categories/${data.categoryId}/property-logs/`,
+      );
     } catch (err) {
       throw toClientError(err);
     }
