@@ -6,17 +6,25 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { useT } from "@/lib/i18n";
+import { sendPhoneCode, verifyPhone as verifyPhoneApi } from "@/lib/api/stores.functions";
+import { parseServerError } from "@/lib/api/error";
 
 export const Route = createFileRoute("/register/verify-phone")({
   head: () => ({ meta: [{ title: "Verify phone — Mixlebs Admin" }] }),
+  // Optional ?phone= so this standalone screen can drive the OTP endpoints.
+  validateSearch: (s: Record<string, unknown>) => ({
+    phone: typeof s.phone === "string" ? s.phone : "",
+  }),
   component: VerifyPhone,
 });
 
 function VerifyPhone() {
   const t = useT();
   const navigate = useNavigate();
+  const { phone } = Route.useSearch();
   const [code, setCode] = useState("");
   const [cooldown, setCooldown] = useState(30);
+  const [verifying, setVerifying] = useState(false);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -24,10 +32,19 @@ function VerifyPhone() {
     return () => clearInterval(id);
   }, [cooldown]);
 
-  function verify() {
-    // POST /api/admin/v1/stores/verify_phone/ — wired later; returns verification_ticket.
-    toast.success(t("auth.vpVerifiedToast"));
-    navigate({ to: "/register" });
+  async function verify() {
+    setVerifying(true);
+    try {
+      // POST /api/admin/v1/stores/verify_phone/ → { verification_ticket }. The
+      // ticket is handed back to the wizard via the ?ticket= search param.
+      const res = await verifyPhoneApi({ data: { phone, code } });
+      toast.success(t("auth.vpVerifiedToast"));
+      navigate({ to: "/register", search: { ticket: res.verification_ticket } as never });
+    } catch (err) {
+      toast.error(parseServerError(err).message || t("auth.vpVerifiedToast"));
+    } finally {
+      setVerifying(false);
+    }
   }
 
   return (
@@ -53,7 +70,7 @@ function VerifyPhone() {
 
         <Button
           className="mt-6 w-full bg-gradient-primary text-primary-foreground shadow-glow"
-          disabled={code.length < 6}
+          disabled={code.length < 6 || verifying}
           onClick={verify}
         >
           {t("auth.vpVerify")}
@@ -69,9 +86,15 @@ function VerifyPhone() {
           <button
             type="button"
             disabled={cooldown > 0}
-            onClick={() => {
-              setCooldown(30);
-              toast.success(t("auth.codeSentToast"));
+            onClick={async () => {
+              try {
+                // POST /api/admin/v1/stores/send_code/
+                await sendPhoneCode({ data: { phone } });
+                setCooldown(30);
+                toast.success(t("auth.codeSentToast"));
+              } catch (err) {
+                toast.error(parseServerError(err).message || t("auth.codeSentToast"));
+              }
             }}
             className="text-primary hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
           >

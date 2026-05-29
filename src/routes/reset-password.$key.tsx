@@ -2,6 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { useState } from "react";
 import { KeyRound, Check, Clock } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -9,6 +10,8 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useT } from "@/lib/i18n";
+import { resetPassword } from "@/lib/api/auth.functions";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
 
 export const Route = createFileRoute("/reset-password/$key")({
   head: () => ({ meta: [{ title: "Reset password — Mixlebs Admin" }] }),
@@ -30,8 +33,9 @@ function ResetPassword() {
   const t = useT();
   const navigate = useNavigate();
   const { key } = Route.useParams();
-  // Demo: trigger the 410 / token_expired view when the key is "expired".
-  const expired = key === "expired";
+  // Flipped to the expired/invalid view when the BE rejects the key with
+  // error_type "token_invalid".
+  const [expired, setExpired] = useState(false);
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
@@ -45,11 +49,22 @@ function ResetPassword() {
   } = form;
   const pw = watch("password");
 
-  function onSubmit(_values: Values) {
-    // POST /api/admin/v1/auth/reset_password/<key>/ — wired later.
-    void _values;
-    toast.success(t("auth.resetDoneToast"));
-    navigate({ to: "/login" });
+  async function onSubmit(values: Values) {
+    // POST /api/admin/v1/auth/reset_password/<key>/. A 400 token_invalid flips
+    // to the expired-link view; field errors surface under the password input.
+    try {
+      await resetPassword({ data: { key, password: values.password } });
+      toast.success(t("auth.resetDoneToast"));
+      navigate({ to: "/login" });
+    } catch (err) {
+      const { errorType, fieldErrors, message } = parseServerError(err);
+      if (errorType === "token_invalid") {
+        setExpired(true);
+        return;
+      }
+      const pwErr = fieldMessage(fieldErrors, "password");
+      form.setError("password", { message: pwErr ?? message });
+    }
   }
 
   if (expired) {

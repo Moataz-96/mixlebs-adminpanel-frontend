@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import {
   Clock,
   Upload,
@@ -17,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useT } from "@/lib/i18n";
+import { getRegistrationStatus, uploadRegisterDocument } from "@/lib/api/stores.functions";
 
 export const Route = createFileRoute("/register/status")({
   head: () => ({ meta: [{ title: "Registration status — Mixlebs Admin" }] }),
@@ -44,25 +46,34 @@ const BANNERS: Record<
 
 function RegisterStatus() {
   const t = useT();
+  const navigate = useNavigate();
   const [uploadOpen, setUploadOpen] = useState(false);
 
-  // GET /api/admin/v1/stores/registration_status/ — wired later. Demo values.
+  // GET /api/admin/v1/stores/registration_status/ — polled every 30s.
+  const statusQuery = useQuery({
+    queryKey: ["registration-status"],
+    queryFn: () => getRegistrationStatus(),
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
   const store = {
-    id: "st_demo_001",
-    shop_name: "Beirut Pantry",
-    status: "PENDING_VERIFICATION" as StoreStatus,
+    id: statusQuery.data?.id ?? "",
+    shop_name: statusQuery.data?.shop_name ?? "",
+    status: (statusQuery.data?.status ?? "PENDING_VERIFICATION") as StoreStatus,
   };
-  const identity = { submitted_at: "2026-05-27", documents_count: 3 };
+  // The registration_status endpoint does not return identity doc count / date
+  // (see required_adminpanel_change.md) — static placeholder summary.
+  const identity = { submitted_at: "—", documents_count: 0 };
 
-  // Poll placeholder: refetch every 30s; redirect to /dashboard when VERIFIED.
+  // Redirect to the dashboard once the store is verified.
   useEffect(() => {
-    const id = setInterval(() => {
-      // refetch registration_status here; redirect on VERIFIED.
-    }, 30_000);
-    return () => clearInterval(id);
-  }, []);
+    if (store.status === "VERIFIED") {
+      navigate({ to: "/dashboard", replace: true });
+    }
+  }, [store.status, navigate]);
 
-  const banner = BANNERS[store.status];
+  const banner = BANNERS[store.status] ?? BANNERS.PENDING_VERIFICATION;
   const Icon = banner.Icon;
   const toneCls: Record<string, string> = {
     warning: "bg-warning/15 text-warning",
@@ -165,7 +176,8 @@ function RegisterStatus() {
 function UploadDocDialog({ onClose }: { onClose: () => void }) {
   const t = useT();
   const inputRef = useRef<HTMLInputElement>(null);
-  const [file, setFile] = useState<string | null>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   return (
     <div
@@ -187,7 +199,7 @@ function UploadDocDialog({ onClose }: { onClose: () => void }) {
             <div className="grid h-9 w-9 place-items-center rounded-md bg-muted text-muted-foreground">
               <FileIcon className="h-4 w-4" />
             </div>
-            <p className="min-w-0 flex-1 truncate text-sm">{file}</p>
+            <p className="min-w-0 flex-1 truncate text-sm">{file.name}</p>
             <Button
               size="sm"
               variant="ghost"
@@ -209,7 +221,7 @@ function UploadDocDialog({ onClose }: { onClose: () => void }) {
               className="hidden"
               onChange={(e) => {
                 const f = e.target.files?.[0];
-                if (f) setFile(f.name);
+                if (f) setFile(f);
                 e.target.value = "";
               }}
             />
@@ -218,11 +230,25 @@ function UploadDocDialog({ onClose }: { onClose: () => void }) {
 
         <Button
           className="mt-5 w-full bg-gradient-primary text-primary-foreground shadow-glow"
-          disabled={!file}
-          onClick={() => {
-            // POST register_document/ then stores/{id}/identity/replace_document/ — wired later.
-            toast.success(t("auth.docUploadedToast"));
-            onClose();
+          disabled={!file || uploading}
+          onClick={async () => {
+            if (!file) return;
+            setUploading(true);
+            try {
+              // POST /api/admin/v1/stores/register_document/ uploads the file.
+              // NOTE: there is no P1 endpoint to ATTACH the re-uploaded doc to an
+              // existing registration (see required_adminpanel_change.md), so the
+              // asset is uploaded but not yet bound to the store.
+              const form = new FormData();
+              form.append("file", file);
+              await uploadRegisterDocument({ data: form });
+              toast.success(t("auth.docUploadedToast"));
+              onClose();
+            } catch {
+              toast.error(t("auth.uploadHint"));
+            } finally {
+              setUploading(false);
+            }
           }}
         >
           {t("auth.upload")}

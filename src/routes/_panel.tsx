@@ -10,19 +10,20 @@ export const Route = createFileRoute("/_panel")({
 });
 
 function PanelLayout() {
-  const { isAuthed } = useApp();
+  const { isAuthed, authLoading } = useApp();
   const navigate = useNavigate();
 
   // Client-side route guard. Every panel route requires an authenticated
-  // session; signing out flips `isAuthed` and bounces back to /login.
+  // session (GET /auth/me). A 401 / missing-cookie session bounces to /login.
+  // Wait for the initial /me probe so a logged-in user isn't bounced mid-fetch.
   useEffect(() => {
-    if (!isAuthed) {
+    if (!authLoading && !isAuthed) {
       const next = encodeURIComponent(window.location.pathname);
       navigate({ to: "/login", search: { next } as never, replace: true });
     }
-  }, [isAuthed, navigate]);
+  }, [isAuthed, authLoading, navigate]);
 
-  if (!isAuthed) return null;
+  if (authLoading || !isAuthed) return null;
 
   return (
     <SidebarProvider>

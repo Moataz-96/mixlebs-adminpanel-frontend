@@ -1,4 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+
+import { me, logout } from "@/lib/api/auth.functions";
 
 export type Role = "admin" | "staff" | "store";
 export type Theme = "light" | "dark";
@@ -23,9 +26,13 @@ interface AppState {
   currentStoreId: string | null;
   setCurrentStoreId: (id: string | null) => void;
   stores: Store[];
-  /** Demo auth flag — set by /login, cleared by sign-out. Drives route guards. */
+  /** True once GET /auth/me succeeds. Drives route guards. */
   isAuthed: boolean;
+  /** True while the initial /auth/me probe is still in flight (avoids a premature /login bounce). */
+  authLoading: boolean;
+  /** Refetch /auth/me after the login/register server fn has set the cookies. */
   signIn: () => void;
+  /** Revoke + clear cookies server-side, then drop the cached /auth/me. */
   signOut: () => void;
 }
 
@@ -44,8 +51,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>("dark");
   const [locale, setLocaleState] = useState<Locale>("en");
   const [currentStoreId, setCurrentStoreId] = useState<string | null>("str_01");
-  // Default authed=true so the demo panel stays browsable; sign-out flips it.
-  const [isAuthed, setIsAuthed] = useState(true);
+
+  // Real auth state: GET /api/admin/v1/auth/me/ via the server fn. A 401 (no /
+  // expired cookies) rejects the query, so `isAuthed` is false and route guards
+  // bounce to /login. The cookies are HttpOnly — no token ever touches JS.
+  const queryClient = useQueryClient();
+  const meQuery = useQuery({
+    queryKey: ["me"],
+    queryFn: () => me(),
+    retry: false,
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+  const isAuthed = !!meQuery.data && !meQuery.isError;
+  const authLoading = meQuery.isPending;
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -54,20 +73,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
       (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     const l = (localStorage.getItem("mx.locale") as Locale) || "en";
     const r = (localStorage.getItem("mx.role") as Role) || "admin";
-    const authed = localStorage.getItem("mx.authed");
     setThemeState(t);
     setLocaleState(l);
     setRole(r);
-    setIsAuthed(authed === null ? true : authed === "1");
   }, []);
 
+  // The login/register server fn has already set the auth cookies; refetch /me.
   const signIn = () => {
-    setIsAuthed(true);
-    if (typeof window !== "undefined") localStorage.setItem("mx.authed", "1");
+    void queryClient.invalidateQueries({ queryKey: ["me"] });
   };
+  // Revoke + clear cookies server-side, then drop the cached /me so guards fire.
   const signOut = () => {
-    setIsAuthed(false);
-    if (typeof window !== "undefined") localStorage.setItem("mx.authed", "0");
+    void logout()
+      .catch(() => undefined)
+      .finally(() => {
+        queryClient.setQueryData(["me"], null);
+        void queryClient.invalidateQueries({ queryKey: ["me"] });
+      });
   };
 
   useEffect(() => {
@@ -93,10 +115,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setCurrentStoreId,
       stores: DEMO_STORES,
       isAuthed,
+      authLoading,
       signIn,
       signOut,
     }),
-    [role, theme, locale, currentStoreId, isAuthed],
+    [role, theme, locale, currentStoreId, isAuthed, authLoading],
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

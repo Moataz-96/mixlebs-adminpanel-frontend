@@ -35,6 +35,14 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { useT } from "@/lib/i18n";
+import {
+  sendPhoneCode,
+  verifyPhone,
+  uploadRegisterDocument,
+  registerStore,
+} from "@/lib/api/stores.functions";
+import { useApp } from "@/lib/app-context";
+import { parseServerError } from "@/lib/api/error";
 
 export const Route = createFileRoute("/register")({
   head: () => ({
@@ -46,6 +54,10 @@ export const Route = createFileRoute("/register")({
           "5-step seller onboarding for Mixlebs: account, shop info, address, identity verification, and payout setup.",
       },
     ],
+  }),
+  // Optional ?ticket= handed back by the standalone /register/verify-phone screen.
+  validateSearch: (s: Record<string, unknown>) => ({
+    ticket: typeof s.ticket === "string" ? s.ticket : "",
   }),
   component: RegisterPage,
 });
@@ -182,7 +194,10 @@ type PaymentValues = z.infer<typeof paymentSchema>;
 function RegisterPage() {
   const t = useT();
   const navigate = useNavigate();
+  const { signIn } = useApp();
+  const { ticket } = Route.useSearch();
   const [step, setStep] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
 
   const STEPS = [
     { key: "account", label: t("auth.stepAccount"), icon: Phone },
@@ -270,6 +285,13 @@ function RegisterPage() {
     },
   });
 
+  // Seed the verification ticket if the standalone verify-phone screen handed
+  // one back via ?ticket=.
+  useEffect(() => {
+    if (ticket) accountForm.setValue("verification_ticket", ticket, { shouldValidate: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticket]);
+
   const stepForms = [accountForm, shopForm, addressForm, identityForm, paymentForm] as const;
 
   async function next() {
@@ -288,7 +310,15 @@ function RegisterPage() {
       return;
     }
     // Final atomic payload: { verification_ticket, user, shop, address, identity, payment }.
+    // FE upload fields (identity_front_side / identity_back_side /
+    // supporting_documents) carry the uploaded asset ids; map them to the BE
+    // keys (identity_*_document_id / supporting_document_ids).
     const account = accountForm.getValues();
+    const shop = shopForm.getValues();
+    const address = addressForm.getValues();
+    const id = identityForm.getValues();
+    const payment = paymentForm.getValues();
+
     const payload = {
       verification_ticket: account.verification_ticket,
       user: {
@@ -298,23 +328,74 @@ function RegisterPage() {
         phone: account.phone,
         password: account.password,
       },
-      shop: shopForm.getValues(),
-      address: addressForm.getValues(),
-      identity: {
-        ...identityForm.getValues(),
-        identity_front_side_asset_id:
-          identityForm.getValues().identity_front_side?.asset_id ?? null,
-        identity_back_side_asset_id: identityForm.getValues().identity_back_side?.asset_id ?? null,
-        supporting_document_ids: identityForm
-          .getValues()
-          .supporting_documents.map((d) => d.asset_id),
+      shop: {
+        name_en: shop.name_en,
+        name_ar: shop.name_ar,
+        about_en: shop.about_en || undefined,
+        about_ar: shop.about_ar || undefined,
+        features_en: shop.features_en || undefined,
+        features_ar: shop.features_ar || undefined,
+        target_audience_en: shop.target_audience_en || undefined,
+        target_audience_ar: shop.target_audience_ar || undefined,
+        selling_promotions_en: shop.selling_promotions_en || undefined,
+        selling_promotions_ar: shop.selling_promotions_ar || undefined,
+        category_id: shop.category_id || undefined,
+        default_language: shop.default_language,
       },
-      payment: paymentForm.getValues(),
+      address: {
+        location_id: address.location_id,
+        latitude: address.latitude,
+        longitude: address.longitude,
+        recipient_name: address.recipient_name,
+        phone_number: address.phone_number,
+        governorate: address.governorate,
+        area: address.area || undefined,
+        postcode: address.postcode || undefined,
+        street: address.street,
+        building: address.building,
+        floor: address.floor,
+        apartment: address.apartment,
+        note: address.note || undefined,
+      },
+      identity: {
+        account_type: id.account_type,
+        identity: id.identity,
+        first_name: id.first_name,
+        middle_name: id.middle_name || undefined,
+        last_name: id.last_name,
+        business_name: id.business_name || undefined,
+        business_license_number: id.business_license_number || undefined,
+        residential_address: id.residential_address,
+        country_of_issue: id.country_of_issue,
+        expiration_date: id.expiration_date,
+        dob: id.dob,
+        identity_front_side_document_id: id.identity_front_side?.asset_id ?? "",
+        identity_back_side_document_id: id.identity_back_side?.asset_id ?? "",
+        supporting_document_ids: id.supporting_documents.map((d) => d.asset_id),
+      },
+      // payment.type (CC/COD/QR/NS) has no BE home in the register contract —
+      // see required_adminpanel_change.md. We send the BE-supported fields only.
+      payment: {
+        brand: payment.brand,
+        holder_name: payment.holder_name,
+        exp_month: payment.exp_month,
+        exp_year: payment.exp_year,
+        token: payment.token,
+      },
     };
-    // Demo: POST /api/admin/v1/stores/register/ wired later.
-    void payload;
-    toast.success(t("auth.registrationSubmitted"));
-    navigate({ to: "/register/status" });
+
+    setSubmitting(true);
+    try {
+      await registerStore({ data: payload });
+      // The new STORE user is auto-signed-in (cookies set server-side).
+      signIn();
+      toast.success(t("auth.registrationSubmitted"));
+      navigate({ to: "/register/status" });
+    } catch (err) {
+      toast.error(parseServerError(err).message || t("auth.fixStepErrors"));
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -393,7 +474,7 @@ function RegisterPage() {
                 <Button
                   className="bg-gradient-primary text-primary-foreground shadow-glow"
                   onClick={submitAll}
-                  disabled={paymentForm.formState.isSubmitting}
+                  disabled={submitting}
                 >
                   <ShieldCheck className="me-1.5 h-4 w-4" /> {t("auth.submitRegistration")}
                 </Button>
@@ -500,9 +581,14 @@ function AccountStep({ form }: { form: UseFormReturn<AccountValues> }) {
               type="button"
               onClick={async () => {
                 const ok = await form.trigger("phone");
-                if (ok) {
+                if (!ok) return;
+                try {
+                  // POST /api/admin/v1/stores/send_code/
+                  await sendPhoneCode({ data: { phone: watch("phone") } });
                   toast.success(t("auth.codeSentToast"));
                   setOtpOpen(true);
+                } catch (err) {
+                  toast.error(parseServerError(err).message || t("auth.fixStepErrors"));
                 }
               }}
             >
@@ -534,10 +620,11 @@ function AccountStep({ form }: { form: UseFormReturn<AccountValues> }) {
 
       {otpOpen && (
         <OtpModal
+          phone={watch("phone")}
           onClose={() => setOtpOpen(false)}
-          onVerified={() => {
+          onVerified={(ticket) => {
             // verify_phone returns a verification_ticket stored in wizard state.
-            setValue("verification_ticket", `vt_demo_${Date.now()}`, { shouldValidate: true });
+            setValue("verification_ticket", ticket, { shouldValidate: true });
             toast.success(t("auth.phoneVerifiedToast"));
             setOtpOpen(false);
           }}
@@ -547,16 +634,48 @@ function AccountStep({ form }: { form: UseFormReturn<AccountValues> }) {
   );
 }
 
-function OtpModal({ onClose, onVerified }: { onClose: () => void; onVerified: () => void }) {
+function OtpModal({
+  phone,
+  onClose,
+  onVerified,
+}: {
+  phone: string;
+  onClose: () => void;
+  onVerified: (verificationTicket: string) => void;
+}) {
   const t = useT();
   const [code, setCode] = useState("");
   const [cooldown, setCooldown] = useState(30);
+  const [verifying, setVerifying] = useState(false);
 
   useEffect(() => {
     if (cooldown <= 0) return;
     const id = setInterval(() => setCooldown((c) => c - 1), 1000);
     return () => clearInterval(id);
   }, [cooldown]);
+
+  async function doVerify() {
+    setVerifying(true);
+    try {
+      // POST /api/admin/v1/stores/verify_phone/ → { verification_ticket }
+      const res = await verifyPhone({ data: { phone, code } });
+      onVerified(res.verification_ticket);
+    } catch (err) {
+      toast.error(parseServerError(err).message || t("auth.fixStepErrors"));
+    } finally {
+      setVerifying(false);
+    }
+  }
+
+  async function doResend() {
+    try {
+      await sendPhoneCode({ data: { phone } });
+      setCooldown(30);
+      toast.success(t("auth.codeSentToast"));
+    } catch (err) {
+      toast.error(parseServerError(err).message || t("auth.fixStepErrors"));
+    }
+  }
 
   return (
     <div
@@ -583,8 +702,8 @@ function OtpModal({ onClose, onVerified }: { onClose: () => void; onVerified: ()
         </div>
         <Button
           className="mt-5 w-full bg-gradient-primary text-primary-foreground shadow-glow"
-          disabled={code.length < 6}
-          onClick={onVerified}
+          disabled={code.length < 6 || verifying}
+          onClick={doVerify}
         >
           {t("auth.verify")}
         </Button>
@@ -593,7 +712,7 @@ function OtpModal({ onClose, onVerified }: { onClose: () => void; onVerified: ()
           <button
             type="button"
             disabled={cooldown > 0}
-            onClick={() => setCooldown(30)}
+            onClick={doResend}
             className="underline-offset-2 hover:underline disabled:no-underline disabled:opacity-60"
           >
             {cooldown > 0 ? t("auth.resendIn", { n: cooldown }) : t("auth.resend")}
@@ -986,9 +1105,12 @@ function IdentityStep({ form }: { form: UseFormReturn<IdentityValues> }) {
   );
 }
 
-/** Mock asset id for a selected file (no real upload — wire-up swaps in register_document/). */
-function mockAsset(file: File): AssetRef {
-  return { asset_id: `asset_${Math.random().toString(36).slice(2, 10)}`, name: file.name };
+/** Upload one file to register_document/ and resolve to an asset reference. */
+async function uploadAsset(file: File): Promise<AssetRef> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await uploadRegisterDocument({ data: form });
+  return { asset_id: res.asset_id, name: file.name };
 }
 
 function FileDrop(
@@ -1015,6 +1137,7 @@ function FileDrop(
   const t = useT();
   const inputRef = useRef<HTMLInputElement>(null);
   const multiple = !!props.multiple;
+  const [uploading, setUploading] = useState(false);
 
   function thumb() {
     return (
@@ -1049,10 +1172,18 @@ function FileDrop(
           type="file"
           accept="image/*,application/pdf"
           className="hidden"
-          onChange={(e) => {
+          onChange={async (e) => {
             const f = e.target.files?.[0];
-            if (f) props.onPick(mockAsset(f));
             e.target.value = "";
+            if (!f) return;
+            setUploading(true);
+            try {
+              props.onPick(await uploadAsset(f));
+            } catch (err) {
+              toast.error(parseServerError(err).message || t("auth.uploadHint"));
+            } finally {
+              setUploading(false);
+            }
           }}
         />
       </div>
@@ -1073,12 +1204,24 @@ function FileDrop(
           accept="image/*,application/pdf"
           multiple={multiple}
           className="hidden"
-          onChange={(e) => {
+          disabled={uploading}
+          onChange={async (e) => {
             const files = Array.from(e.target.files ?? []);
-            if (!files.length) return;
-            if (multiple) props.onAdd!(files.map(mockAsset));
-            else props.onPick!(mockAsset(files[0]));
             e.target.value = "";
+            if (!files.length) return;
+            setUploading(true);
+            try {
+              if (multiple) {
+                const assets = await Promise.all(files.map(uploadAsset));
+                props.onAdd!(assets);
+              } else {
+                props.onPick!(await uploadAsset(files[0]));
+              }
+            } catch (err) {
+              toast.error(parseServerError(err).message || t("auth.uploadHint"));
+            } finally {
+              setUploading(false);
+            }
           }}
         />
       </label>

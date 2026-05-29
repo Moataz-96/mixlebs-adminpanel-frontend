@@ -12,6 +12,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useApp } from "@/lib/app-context";
 import { useT } from "@/lib/i18n";
+import { login } from "@/lib/api/auth.functions";
+import { parseServerError } from "@/lib/api/error";
 
 export const Route = createFileRoute("/login")({
   head: () => ({ meta: [{ title: "Sign in — Mixlebs Admin" }] }),
@@ -52,26 +54,30 @@ function LoginPage() {
     formState: { errors, isSubmitting },
   } = form;
 
-  function onSubmit(values: Values) {
-    // Demo auth: map a couple of error_type envelopes so the wiring engineer
-    // can see the surface; everything else signs in.
-    const id = values.identifier.toLowerCase();
-    if (id.startsWith("customer") || id.includes("+customer")) {
-      toast.error(t("auth.errCustomer"));
-      return;
-    }
-    if (values.password === "inactive") {
-      toast.error(t("auth.errInactive"));
-      return;
-    }
-    if (values.password === "wrong") {
+  async function onSubmit(values: Values) {
+    // POST /api/admin/v1/auth/login/. The server fn writes the HttpOnly auth
+    // cookies and returns only {user, store}; signIn() refetches /auth/me.
+    try {
+      await login({ data: values });
+      signIn();
+      toast.success(t("auth.signedIn"));
+      const next = new URLSearchParams(window.location.search).get("next");
+      navigate({ to: next && next.startsWith("/") ? (next as never) : "/dashboard" });
+    } catch (err) {
+      const { errorType } = parseServerError(err);
+      // 403 user_not_allowed (CUSTOMER trying the admin panel).
+      if (errorType === "user_not_allowed") {
+        toast.error(t("auth.errCustomer"));
+        return;
+      }
+      // 403 user_inactive (deactivated account).
+      if (errorType === "user_inactive") {
+        toast.error(t("auth.errInactive"));
+        return;
+      }
+      // 401 invalid_credentials → surface under the password field.
       form.setError("password", { message: t("auth.errInvalid") });
-      return;
     }
-    signIn();
-    toast.success(t("auth.signedIn"));
-    const next = new URLSearchParams(window.location.search).get("next");
-    navigate({ to: next && next.startsWith("/") ? (next as never) : "/dashboard" });
   }
 
   return (

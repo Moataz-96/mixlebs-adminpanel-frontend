@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useT } from "@/lib/i18n";
+import { forgotPassword } from "@/lib/api/auth.functions";
+import { parseServerError, fieldMessage } from "@/lib/api/error";
 
 export const Route = createFileRoute("/forgot-password")({
   head: () => ({ meta: [{ title: "Forgot password — Mixlebs Admin" }] }),
@@ -42,10 +44,24 @@ function ForgotPassword() {
     formState: { errors, isSubmitting },
   } = form;
 
-  function onSubmit(_values: Values) {
-    // POST /api/admin/v1/auth/forgot_password/ — response is intentionally neutral.
-    void _values;
-    setSent(true);
+  async function onSubmit(values: Values) {
+    // POST /api/admin/v1/auth/forgot_password/ — the BE response is always
+    // neutral (never reveals whether the account exists), so we show the
+    // neutral confirmation regardless of outcome. A validation error (e.g.
+    // malformed identifier) is surfaced on the field.
+    try {
+      await forgotPassword({ data: values });
+      setSent(true);
+    } catch (err) {
+      const { fieldErrors } = parseServerError(err);
+      const idMsg = fieldMessage(fieldErrors, "identifier");
+      if (idMsg) {
+        form.setError("identifier", { message: idMsg });
+        return;
+      }
+      // Stay neutral on any other error.
+      setSent(true);
+    }
   }
 
   return (
