@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   ShoppingCart,
   DollarSign,
@@ -48,7 +49,15 @@ import {
 } from "@/components/ui/table";
 import { usePageState } from "@/lib/page-state";
 import { useT, type TFunction } from "@/lib/i18n";
-import { ORDERS, PRODUCTS } from "@/lib/mock-data";
+import { useApp } from "@/lib/app-context";
+import {
+  getOverview,
+  getTimeseries,
+  getFunnel,
+  getWallet,
+  type FunnelPayload,
+  type TimeseriesPoint,
+} from "@/lib/api/dashboard.functions";
 
 export const Route = createFileRoute("/_panel/dashboard")({
   head: () => ({
@@ -68,6 +77,8 @@ function Dashboard() {
   const t = useT();
   const { has, role } = usePermissions();
   const state = usePageState();
+  // Live store list (topbar/dashboard share the same source — see app-context).
+  const { stores, currentStoreId } = useApp();
 
   const canAllStores = has("dashboard.view_all_stores");
   const canIdentityReview = has("stores.review_identity");
@@ -83,15 +94,90 @@ function Dashboard() {
 
   const [range, setRange] = useState("30d");
   const [compare, setCompare] = useState("prev");
-  // STORE users never see the store picker — default to their own store.
-  const [store, setStore] = useState(canAllStores ? "all" : "str_01");
+  // STORE users never see the store picker — pinned to their own store id.
+  // STAFF/ADMIN default to "all" only when they may view across stores; the
+  // first available store otherwise.
+  const [store, setStore] = useState<string>(() => {
+    if (role === "store") return currentStoreId ?? "";
+    return canAllStores ? "all" : (currentStoreId ?? "");
+  });
   const [granularity, setGranularity] = useState<"day" | "week" | "month">("day");
 
-  const revSpark = useMemo(() => generateSpark(28, 22, 96), []);
-  const ordersSpark = useMemo(() => generateSpark(28, 18, 74), []);
+  // Resolve the selected range to ISO date bounds the BE expects. "custom" has
+  // no inline date pickers in the frozen UI, so it falls back to the 30d window.
+  const { dateFrom, dateTo } = useMemo(() => rangeToDates(range), [range]);
+  const compareTo = compare === "year" ? "prev_year" : "prev_period";
+  // null store_id => cross-store aggregate (needs dashboard.view_all_stores).
+  const storeId = store && store !== "all" ? store : null;
+
+  const overviewQuery = useQuery({
+    queryKey: ["dashboard", "overview", { dateFrom, dateTo, storeId, compareTo }],
+    queryFn: () =>
+      getOverview({
+        data: { date_from: dateFrom, date_to: dateTo, store_id: storeId, compare_to: compareTo },
+      }),
+  });
+  const revenueSeriesQuery = useQuery({
+    queryKey: ["dashboard", "timeseries", "revenue", { dateFrom, dateTo, storeId, granularity }],
+    queryFn: () =>
+      getTimeseries({
+        data: {
+          metric: "revenue",
+          granularity,
+          date_from: dateFrom,
+          date_to: dateTo,
+          store_id: storeId,
+        },
+      }),
+  });
+  const ordersSeriesQuery = useQuery({
+    queryKey: ["dashboard", "timeseries", "orders", { dateFrom, dateTo, storeId, granularity }],
+    queryFn: () =>
+      getTimeseries({
+        data: {
+          metric: "orders",
+          granularity,
+          date_from: dateFrom,
+          date_to: dateTo,
+          store_id: storeId,
+        },
+      }),
+  });
+  const funnelQuery = useQuery({
+    queryKey: ["dashboard", "funnel", { dateFrom, dateTo, storeId }],
+    queryFn: () => getFunnel({ data: { date_from: dateFrom, date_to: dateTo, store_id: storeId } }),
+  });
+  const walletQuery = useQuery({
+    queryKey: ["dashboard", "wallet", { dateFrom, dateTo, storeId }],
+    queryFn: () => getWallet({ data: { date_from: dateFrom, date_to: dateTo, store_id: storeId } }),
+  });
+
+  const o = overviewQuery.data;
+
+  // Sparklines: real timeseries values when present, else an empty baseline.
+  const revSpark = useMemo(() => seriesToPoints(revenueSeriesQuery.data?.series), [
+    revenueSeriesQuery.data,
+  ]);
+  const ordersSpark = useMemo(() => seriesToPoints(ordersSeriesQuery.data?.series), [
+    ordersSeriesQuery.data,
+  ]);
+
+  // The page is "loading" until the headline overview resolves; an error there
+  // surfaces the error state. The forced ?state= preview still wins.
+  const effState =
+    state !== "populated"
+      ? state
+      : overviewQuery.isPending
+        ? "loading"
+        : overviewQuery.isError
+          ? "error"
+          : "populated";
 
   const rangeLabel = RANGES.find((r) => r.value === range)?.label ?? "";
-  const storeLabel = store === "all" ? t("dashboard.allStores") : (STORE_NAMES[store] ?? store);
+  const storeLabel =
+    store === "all"
+      ? t("dashboard.allStores")
+      : (stores.find((s) => s.id === store)?.name ?? store);
   const compareLabel = compare === "prev" ? t("dashboard.comparePrev") : t("dashboard.compareYear");
 
   return (
@@ -119,9 +205,9 @@ function Dashboard() {
             </SelectTrigger>
             <SelectContent>
               {canAllStores && <SelectItem value="all">{t("dashboard.allStores")}</SelectItem>}
-              {Object.entries(STORE_NAMES).map(([id, name]) => (
-                <SelectItem key={id} value={id}>
-                  {name}
+              {stores.map((s) => (
+                <SelectItem key={s.id} value={s.id}>
+                  {s.name}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -158,7 +244,7 @@ function Dashboard() {
       </div>
 
       <PageStates
-        state={state}
+        state={effState}
         skeleton={
           <div className="mt-4 space-y-6">
             <CardsSkeleton count={8} />
@@ -171,89 +257,73 @@ function Dashboard() {
         <div className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-4">
           <KpiCard
             label={t("dashboard.kpiRevenueGross")}
-            value="$12,486"
-            delta="+18.2%"
-            trend="up"
+            value={fmtMoney(o?.revenue_gross)}
+            {...deltaProps(o?.deltas?.revenue_gross)}
             icon={<DollarSign className="h-5 w-5" />}
             accent
           />
           <KpiCard
             label={t("dashboard.kpiRevenueNet")}
-            value="$11,902"
-            delta="+16.1%"
-            trend="up"
+            value={fmtMoney(o?.revenue_net)}
+            {...deltaProps(o?.deltas?.revenue_net)}
             icon={<DollarSign className="h-5 w-5" />}
           />
           <KpiCard
             label={t("dashboard.kpiOrders")}
-            value="84"
-            delta="+12"
-            trend="up"
+            value={fmtNum(o?.orders_count)}
+            {...deltaProps(o?.deltas?.orders_count)}
             icon={<ShoppingCart className="h-5 w-5" />}
           />
           <KpiCard
             label={t("dashboard.kpiAov")}
-            value="$48.20"
-            delta="+3.4%"
-            trend="up"
+            value={fmtMoney(o?.average_order_value)}
+            {...deltaProps(o?.deltas?.average_order_value)}
             icon={<Activity className="h-5 w-5" />}
           />
 
           <KpiCard
             label={t("dashboard.kpiNewCustomers")}
-            value="36"
-            delta="-4"
-            trend="down"
+            value={fmtNum(o?.new_customers)}
+            {...deltaProps(o?.deltas?.new_customers)}
             icon={<Users className="h-5 w-5" />}
           />
           <KpiCard
             label={t("dashboard.kpiReturningCustomers")}
-            value="58"
-            delta="+9"
-            trend="up"
+            value={fmtNum(o?.returning_customers)}
+            {...deltaProps(o?.deltas?.returning_customers)}
             icon={<Users className="h-5 w-5" />}
           />
           <KpiCard
             label={t("dashboard.kpiConversion")}
-            value="3.42%"
-            delta="+0.31pp"
-            trend="up"
+            value={fmtPct(o?.conversion_rate)}
             icon={<Percent className="h-5 w-5" />}
           />
           <KpiCard
             label={t("dashboard.kpiReturnsRate")}
-            value="0.8%"
-            delta="-0.2pp"
-            trend="up"
+            value={fmtPct(o?.returns_rate)}
             icon={<RotateCcw className="h-5 w-5" />}
           />
 
           <KpiCard
             label={t("dashboard.kpiAbandoned")}
-            value="42"
-            delta="+6"
-            trend="down"
+            value={fmtNum(o?.abandoned_carts)}
             icon={<ShoppingCart className="h-5 w-5" />}
           />
           <KpiCard
             label={t("dashboard.kpiActiveProducts")}
-            value="1,284"
-            delta={t("dashboard.kpiLowStockDelta", { n: 22 })}
+            value={fmtNum(o?.active_products)}
+            delta={t("dashboard.kpiLowStockDelta", { n: o?.out_of_stock_products ?? 0 })}
             trend="flat"
             icon={<Package className="h-5 w-5" />}
           />
           <KpiCard
             label={t("dashboard.kpiOutOfStock")}
-            value="22"
-            delta="+3"
-            trend="down"
+            value={fmtNum(o?.out_of_stock_products)}
             icon={<AlertTriangle className="h-5 w-5" />}
           />
           <KpiCard
             label={t("dashboard.kpiProductRating")}
-            value="4.6"
-            delta="+0.1"
-            trend="up"
+            value={fmtRating(o?.avg_product_rating)}
             icon={<Star className="h-5 w-5" />}
           />
 
@@ -264,30 +334,22 @@ function Dashboard() {
                 ? t("dashboard.kpiPlatformRating")
                 : t("dashboard.kpiStoreRating")
             }
-            value="4.8"
-            delta={t("dashboard.kpiStable")}
-            trend="flat"
+            value={fmtRating(o?.avg_store_rating)}
             icon={<Star className="h-5 w-5" />}
           />
           <KpiCard
             label={t("dashboard.kpiWalletInflow")}
-            value="$8,450"
-            delta="+22%"
-            trend="up"
+            value={fmtMoney(o?.wallet_inflow)}
             icon={<Wallet className="h-5 w-5" />}
           />
           <KpiCard
             label={t("dashboard.kpiWalletOutflow")}
-            value="$2,120"
-            delta="+5%"
-            trend="down"
+            value={fmtMoney(o?.wallet_outflow)}
             icon={<ArrowDownRight className="h-5 w-5" />}
           />
           <KpiCard
             label={t("dashboard.kpiCoupons")}
-            value="48"
-            delta="+15"
-            trend="up"
+            value={fmtNum(o?.coupon_redemptions)}
             icon={<Percent className="h-5 w-5" />}
           />
         </div>
@@ -343,7 +405,7 @@ function Dashboard() {
             </div>
             <Badge variant="outline">{rangeLabel}</Badge>
           </div>
-          <Funnel t={t} />
+          <Funnel t={t} data={funnelQuery.data} />
         </Card>
 
         {/* Tables row */}
@@ -367,29 +429,30 @@ function Dashboard() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {PRODUCTS.slice(0, 5).map((p, i) => (
-                  <TableRow key={p.id}>
+                {(o?.top_products ?? []).slice(0, 5).map((p, i) => (
+                  <TableRow key={p.product_id}>
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {i + 1}
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
                         <div className="grid h-8 w-8 place-items-center rounded-md bg-muted text-xs font-mono">
-                          {p.sku.slice(0, 3)}
+                          {p.product_id.slice(0, 3).toUpperCase()}
                         </div>
-                        <span className="text-sm font-medium">{p.name}</span>
+                        {/* BE top_products carries no product name (ENTRY 015). */}
+                        <span className="text-sm font-medium font-mono">{p.product_id}</span>
                       </div>
                     </TableCell>
-                    <TableCell className="font-mono text-xs">{p.sku}</TableCell>
+                    {/* BE top_products carries no SKU (ENTRY 015). */}
+                    <TableCell className="font-mono text-xs text-muted-foreground">—</TableCell>
                     <TableCell className="text-end font-mono tabular-nums">
-                      {120 - i * 14}
+                      {fmtNum(p.units_sold)}
                     </TableCell>
                     <TableCell className="text-end font-mono tabular-nums">
-                      ${((120 - i * 14) * p.price) | 0}
+                      {fmtMoney(p.revenue)}
                     </TableCell>
-                    <TableCell className="text-end text-muted-foreground">
-                      {(4.2 - i * 0.4).toFixed(1)}%
-                    </TableCell>
+                    {/* BE top_products carries no per-product conversion (ENTRY 015). */}
+                    <TableCell className="text-end text-muted-foreground">—</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -413,21 +476,20 @@ function Dashboard() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {[
-                  { name: "Spices", u: 412, r: 8240 },
-                  { name: "Pantry", u: 308, r: 6180 },
-                  { name: "Sweets", u: 198, r: 4250 },
-                  { name: "Beverages", u: 142, r: 1860 },
-                  { name: "Bakery", u: 96, r: 1240 },
-                ].map((c, i) => (
-                  <TableRow key={c.name}>
+                {(o?.top_categories ?? []).slice(0, 5).map((c, i) => (
+                  <TableRow key={c.category_id ?? `uncat-${i}`}>
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {i + 1}
                     </TableCell>
-                    <TableCell className="text-sm font-medium">{c.name}</TableCell>
-                    <TableCell className="text-end font-mono tabular-nums">{c.u}</TableCell>
+                    {/* BE top_categories carries category_id only, no name (ENTRY 015). */}
+                    <TableCell className="text-sm font-medium font-mono">
+                      {c.category_id != null ? `#${c.category_id}` : "—"}
+                    </TableCell>
                     <TableCell className="text-end font-mono tabular-nums">
-                      ${c.r.toLocaleString()}
+                      {fmtNum(c.units_sold)}
+                    </TableCell>
+                    <TableCell className="text-end font-mono tabular-nums">
+                      {fmtMoney(c.revenue)}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -457,30 +519,28 @@ function Dashboard() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {PRODUCTS.filter((p) => p.stock < 40)
-                  .slice(0, 5)
-                  .map((p) => (
-                    <TableRow key={p.id}>
-                      <TableCell className="text-sm font-medium">{p.name}</TableCell>
-                      <TableCell className="font-mono text-xs">{p.sku}</TableCell>
-                      <TableCell
-                        className={`text-end font-mono tabular-nums ${p.stock === 0 ? "text-destructive" : "text-warning"}`}
-                      >
-                        {p.stock}
-                      </TableCell>
-                      <TableCell className="text-end text-muted-foreground">10</TableCell>
-                      <TableCell className="text-end text-xs text-muted-foreground">
-                        {p.updated}
-                      </TableCell>
-                      <TableCell className="text-end">
-                        <Button size="sm" variant="ghost" asChild>
-                          <Link to="/products/$id/edit" params={{ id: p.id }}>
-                            {t("dashboard.restock")}
-                          </Link>
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                {(o?.stock_alerts ?? []).slice(0, 5).map((a) => (
+                  <TableRow key={a.variant_id}>
+                    {/* BE stock_alerts carries product_id + sku, no product name (ENTRY 015). */}
+                    <TableCell className="text-sm font-medium font-mono">{a.product_id}</TableCell>
+                    <TableCell className="font-mono text-xs">{a.sku}</TableCell>
+                    <TableCell
+                      className={`text-end font-mono tabular-nums ${a.current_stock === 0 ? "text-destructive" : "text-warning"}`}
+                    >
+                      {a.current_stock}
+                    </TableCell>
+                    <TableCell className="text-end text-muted-foreground">{a.threshold}</TableCell>
+                    {/* BE stock_alerts carries no last-sold timestamp (ENTRY 015). */}
+                    <TableCell className="text-end text-xs text-muted-foreground">—</TableCell>
+                    <TableCell className="text-end">
+                      <Button size="sm" variant="ghost" asChild>
+                        <Link to="/products/$id/edit" params={{ id: a.product_id }}>
+                          {t("dashboard.restock")}
+                        </Link>
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
               </TableBody>
             </Table>
           </Card>
@@ -492,16 +552,21 @@ function Dashboard() {
                 <h3 className="font-display text-base font-semibold">{t("dashboard.wallet")}</h3>
                 <Wallet className="h-4 w-4 text-muted-foreground" />
               </div>
-              <p className="font-display text-3xl font-bold tabular-nums">$6,330</p>
+              {/* Period balance has no BE field (P3 wallet exposes flows only, ENTRY 016). */}
+              <p className="font-display text-3xl font-bold tabular-nums">—</p>
               <p className="mt-1 text-xs text-muted-foreground">{t("dashboard.walletBalance")}</p>
               <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
                 <div className="rounded-lg border bg-background/40 p-2.5">
                   <p className="text-muted-foreground">{t("dashboard.inflow")}</p>
-                  <p className="mt-0.5 font-mono font-semibold text-success">+$8,450</p>
+                  <p className="mt-0.5 font-mono font-semibold text-success">
+                    +{fmtMoney(walletQuery.data?.wallet_inflow ?? o?.wallet_inflow)}
+                  </p>
                 </div>
                 <div className="rounded-lg border bg-background/40 p-2.5">
                   <p className="text-muted-foreground">{t("dashboard.outflow")}</p>
-                  <p className="mt-0.5 font-mono font-semibold text-destructive">-$2,120</p>
+                  <p className="mt-0.5 font-mono font-semibold text-destructive">
+                    -{fmtMoney(walletQuery.data?.wallet_outflow ?? o?.wallet_outflow)}
+                  </p>
                 </div>
               </div>
               <Button variant="outline" size="sm" className="mt-3 w-full" asChild>
@@ -525,27 +590,29 @@ function Dashboard() {
                 <AttentionItem
                   icon={RotateCcw}
                   label={t("dashboard.attnReturns")}
-                  count={4}
+                  count={o?.returns_count ?? 0}
                   to="/returns"
                 />
                 <AttentionItem
                   icon={AlertTriangle}
                   label={t("dashboard.attnLowStock")}
-                  count={22}
+                  count={o?.stock_alerts?.length ?? 0}
                   to="/products"
                 />
+                {/* Support sessions awaiting reply: no P3 dashboard field (ENTRY 017). */}
                 <AttentionItem
                   icon={MessageSquare}
                   label={t("dashboard.attnSupport")}
-                  count={2}
+                  count={0}
                   to="/support"
                 />
-                {/* Identity reviews pending — hidden for STORE; needs stores.review_identity. */}
+                {/* Identity reviews pending — hidden for STORE; needs stores.review_identity.
+                    No P3 dashboard count field; static placeholder (ENTRY 017). */}
                 {canIdentityReview && (
                   <AttentionItem
                     icon={FileWarning}
                     label={t("dashboard.attnIdentity")}
-                    count={1}
+                    count={0}
                     to="/stores"
                   />
                 )}
@@ -559,6 +626,8 @@ function Dashboard() {
                 </h3>
                 <Truck className="h-4 w-4 text-muted-foreground" />
               </div>
+              {/* Top couriers (fee/ETA/success-rate) is not part of the P3 dashboard
+                  contract — courier analytics arrive with P6. Static placeholder (ENTRY 017). */}
               <ul className="space-y-2.5 text-sm">
                 {[
                   { name: "Aramex", fee: "$4.20", eta: "2d", rate: "98%" },
@@ -589,12 +658,15 @@ function Dashboard() {
                 <Link to="/orders">{t("dashboard.viewAll")} →</Link>
               </Button>
             </div>
+            {/* Recent-orders list is not part of the P3 dashboard contract (overview /
+                timeseries / funnel / wallet only); the orders surface arrives in P5.
+                Static placeholder until then (ENTRY 017). */}
             <div className="divide-y">
-              {ORDERS.slice(0, 6).map((o) => (
-                <div key={o.id} className="flex items-center gap-4 px-5 py-3.5">
+              {RECENT_ORDERS_PLACEHOLDER.map((row) => (
+                <div key={row.id} className="flex items-center gap-4 px-5 py-3.5">
                   <Avatar className="h-9 w-9">
                     <AvatarFallback className="bg-muted text-xs">
-                      {o.customer
+                      {row.customer
                         .split(" ")
                         .map((w) => w[0])
                         .join("")}
@@ -602,18 +674,18 @@ function Dashboard() {
                   </Avatar>
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium">
-                      {o.customer}{" "}
+                      {row.customer}{" "}
                       <span className="ms-2 font-mono text-xs text-muted-foreground">
-                        {o.number}
+                        {row.number}
                       </span>
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      {o.store} · {o.items} {t("dashboard.colItem").toLowerCase()} · {o.placed}
+                      {row.store} · {row.items} {t("dashboard.colItem").toLowerCase()} · {row.placed}
                     </p>
                   </div>
-                  <StatusBadge status={o.status} />
+                  <StatusBadge status={row.status} />
                   <p className="font-mono text-sm font-semibold tabular-nums">
-                    ${o.total.toFixed(2)}
+                    ${row.total.toFixed(2)}
                   </p>
                 </div>
               ))}
@@ -640,6 +712,8 @@ function Dashboard() {
                   <TableHead></TableHead>
                 </TableRow>
               </TableHeader>
+              {/* Pending-returns list is not part of the P3 dashboard contract;
+                  the returns surface arrives in P5. Static placeholder (ENTRY 017). */}
               <TableBody>
                 {[
                   {
@@ -693,13 +767,99 @@ function Dashboard() {
   );
 }
 
-const STORE_NAMES: Record<string, string> = {
-  str_01: "Beirut Pantry",
-  str_02: "Saida Sweets",
-  str_03: "Tripoli Spices",
-  str_04: "Cedar Goods Co.",
-  str_05: "Zahle Olive Press",
-};
+// Static recent-orders rows. The recent-orders list is NOT part of the P3
+// dashboard contract (overview / timeseries / funnel / wallet only); the orders
+// surface is wired in P5. Until then this placeholder keeps the frozen UI
+// intact. Logged as ENTRY 017 in required_adminpanel_change.md.
+const RECENT_ORDERS_PLACEHOLDER: {
+  id: string;
+  number: string;
+  customer: string;
+  store: string;
+  total: number;
+  status: string;
+  items: number;
+  placed: string;
+}[] = [
+  {
+    id: "ph_1",
+    number: "MX-—",
+    customer: "—",
+    store: "—",
+    total: 0,
+    status: "PENDING",
+    items: 0,
+    placed: "—",
+  },
+];
+
+// --- formatting helpers (decimal money fields arrive as strings) ---
+
+function fmtMoney(v: string | number | null | undefined): string {
+  if (v === null || v === undefined || v === "") return "$0.00";
+  const n = typeof v === "string" ? Number(v) : v;
+  if (Number.isNaN(n)) return "$0.00";
+  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function fmtNum(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "0";
+  return v.toLocaleString();
+}
+
+// conversion_rate / returns_rate are floats. Assume a 0–1 fraction → percent;
+// values already >1 are treated as already-percent.
+function fmtPct(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "0%";
+  const pct = v <= 1 ? v * 100 : v;
+  return `${pct.toFixed(2)}%`;
+}
+
+function fmtRating(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "—";
+  return v.toFixed(1);
+}
+
+// Convert a fractional period-over-period delta (e.g. 0.182 = +18.2%) into the
+// KpiCard {delta, trend} props. Null deltas render no delta line.
+function deltaProps(v: number | null | undefined): { delta?: string; trend: "up" | "down" | "flat" } {
+  if (v === null || v === undefined) return { trend: "flat" };
+  const pct = v * 100;
+  const sign = pct > 0 ? "+" : "";
+  const trend = pct > 0 ? "up" : pct < 0 ? "down" : "flat";
+  return { delta: `${sign}${pct.toFixed(1)}%`, trend };
+}
+
+// Map the selected range preset to ISO date bounds (YYYY-MM-DD). "custom" has no
+// inline pickers in the frozen UI, so it falls back to the 30d window.
+function rangeToDates(range: string): { dateFrom: string; dateTo: string } {
+  const to = new Date();
+  const from = new Date(to);
+  switch (range) {
+    case "today":
+      break;
+    case "7d":
+      from.setDate(from.getDate() - 6);
+      break;
+    case "90d":
+      from.setDate(from.getDate() - 89);
+      break;
+    case "30d":
+    case "custom":
+    default:
+      from.setDate(from.getDate() - 29);
+      break;
+  }
+  const iso = (d: Date) => d.toISOString().slice(0, 10);
+  return { dateFrom: iso(from), dateTo: iso(to) };
+}
+
+// Timeseries values are decimal strings; Sparkline wants number[]. Empty series
+// renders a flat baseline so the chart still draws.
+function seriesToPoints(series: TimeseriesPoint[] | undefined): number[] {
+  if (!series || series.length === 0) return [0, 0];
+  return series.map((p) => Number(p.value) || 0);
+}
 
 function DashboardEmpty({ t }: { t: TFunction }) {
   return (
@@ -758,20 +918,21 @@ function AttentionItem({
   );
 }
 
-function Funnel({ t }: { t: TFunction }) {
+function Funnel({ t, data }: { t: TFunction; data?: FunnelPayload }) {
   const stages = [
-    { label: t("dashboard.funnelVisits"), value: 24800 },
-    { label: t("dashboard.funnelViews"), value: 12400 },
-    { label: t("dashboard.funnelCart"), value: 4200 },
-    { label: t("dashboard.funnelCheckouts"), value: 1480 },
-    { label: t("dashboard.funnelOrders"), value: 848 },
+    { label: t("dashboard.funnelVisits"), value: data?.visits ?? 0 },
+    { label: t("dashboard.funnelViews"), value: data?.product_views ?? 0 },
+    { label: t("dashboard.funnelCart"), value: data?.adds_to_cart ?? 0 },
+    { label: t("dashboard.funnelCheckouts"), value: data?.checkouts ?? 0 },
+    { label: t("dashboard.funnelOrders"), value: data?.orders ?? 0 },
   ];
-  const max = stages[0].value;
+  const max = stages[0].value || 1;
   return (
     <div className="space-y-2.5">
       {stages.map((s, i) => {
         const pct = (s.value / max) * 100;
-        const conv = i === 0 ? 100 : (s.value / stages[i - 1].value) * 100;
+        const prev = stages[i - 1]?.value ?? 0;
+        const conv = i === 0 ? 100 : prev > 0 ? (s.value / prev) * 100 : 0;
         return (
           <div key={s.label} className="flex items-center gap-3">
             <span className="w-32 text-sm font-medium">{s.label}</span>
@@ -792,15 +953,6 @@ function Funnel({ t }: { t: TFunction }) {
       })}
     </div>
   );
-}
-
-function generateSpark(n: number, min: number, max: number) {
-  let v = (min + max) / 2;
-  return Array.from({ length: n }).map(() => {
-    v += (Math.random() - 0.45) * (max - min) * 0.18;
-    v = Math.max(min, Math.min(max, v));
-    return v;
-  });
 }
 
 function Sparkline({ points }: { points: number[] }) {

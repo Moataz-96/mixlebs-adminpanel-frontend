@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { me, logout } from "@/lib/api/auth.functions";
+import { listStores, type AdminStoreListItem } from "@/lib/api/stores.admin.functions";
 
 export type Role = "admin" | "staff" | "store";
 export type Theme = "light" | "dark";
@@ -38,13 +39,46 @@ interface AppState {
 
 const AppContext = createContext<AppState | null>(null);
 
-export const DEMO_STORES: Store[] = [
-  { id: "str_01", name: "Beirut Pantry", logo: "BP", status: "Verified" },
-  { id: "str_02", name: "Saida Sweets", logo: "SS", status: "Verified" },
-  { id: "str_03", name: "Tripoli Spices", logo: "TS", status: "Pending" },
-  { id: "str_04", name: "Cedar Goods Co.", logo: "CG", status: "Verified" },
-  { id: "str_05", name: "Zahle Olive Press", logo: "ZO", status: "Unverified" },
-];
+// ---------------------------------------------------------------------------
+// Store-picker data source (plan §6.2). The old DEMO_STORES constant is gone —
+// the picker is fed live from GET /api/admin/v1/stores/ for STAFF/ADMIN and
+// from me.store for a STORE user. The topbar (AppTopbar) + dashboard consume
+// `stores` as a Store[] ({ id, name, logo, status }), so the live rows are
+// mapped down to that exact shape and the existing currentStoreId /
+// setCurrentStoreId API is unchanged. P7 Wire reuses this same `stores` hook.
+// ---------------------------------------------------------------------------
+
+// BE StoreStatusEnum → the panel's coarse StoreStatus the StatusBadge expects.
+function mapStoreStatus(status: string | null | undefined): StoreStatus {
+  switch (status) {
+    case "VERIFIED":
+      return "Verified";
+    case "BLOCKED":
+      return "Blocked";
+    case "PENDING_VERIFICATION":
+    case "PENDING_PAYMENT":
+      return "Pending";
+    default:
+      return "Unverified";
+  }
+}
+
+// The demo carried a 2-letter monogram as `logo`; derive it from the shop name.
+function monogram(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "··";
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+  return (words[0][0] + words[1][0]).toUpperCase();
+}
+
+function mapAdminStore(s: AdminStoreListItem): Store {
+  return {
+    id: s.id,
+    name: s.shop_name,
+    logo: monogram(s.shop_name),
+    status: mapStoreStatus(s.status),
+  };
+}
 
 // CustomUser.type → panel Role. STAFF and ADMIN both map to the platform-staff
 // surface; STORE is the seller surface. CUSTOMER never reaches the panel.
@@ -58,7 +92,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [role, setRole] = useState<Role>("admin");
   const [theme, setThemeState] = useState<Theme>("dark");
   const [locale, setLocaleState] = useState<Locale>("en");
-  const [currentStoreId, setCurrentStoreId] = useState<string | null>("str_01");
+  // null == "all stores" for STAFF/ADMIN. A STORE user is pinned to their own
+  // store id once /auth/me resolves (effect below).
+  const [currentStoreId, setCurrentStoreId] = useState<string | null>(null);
 
   // Real auth state: GET /api/admin/v1/auth/me/ via the server fn. A 401 (no /
   // expired cookies) rejects the query, so `isAuthed` is false and route guards
@@ -81,6 +117,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const permissions = useMemo(() => meQuery.data?.permissions ?? [], [meQuery.data]);
   const isSuperuser = meQuery.data?.user?.is_superuser === true;
 
+  // Live store list driving the topbar / dashboard store-picker. STAFF/ADMIN
+  // get the paginated GET /stores/ list; STORE users never see the picker, so
+  // their list is just their own store from /auth/me. The query is gated on
+  // being authenticated + non-STORE so a STORE/CUSTOMER session never calls it.
+  const userType = meQuery.data?.user?.type;
+  const isStorePicker = isAuthed && userType !== "STORE";
+  const storesQuery = useQuery({
+    queryKey: ["stores", "available"],
+    queryFn: () => listStores({ data: { page_size: 100, ordering: "rank" } }),
+    enabled: isStorePicker,
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  const stores = useMemo<Store[]>(() => {
+    if (userType === "STORE") {
+      const s = meQuery.data?.store;
+      if (s?.id) {
+        const name = (s.shop_name as string) ?? "";
+        return [{ id: String(s.id), name, logo: monogram(name), status: mapStoreStatus(s.status) }];
+      }
+      return [];
+    }
+    return (storesQuery.data?.results ?? []).map(mapAdminStore);
+  }, [userType, meQuery.data?.store, storesQuery.data]);
+
   useEffect(() => {
     // Push the live permission set into the module-scoped holder the exported
     // can() reads, so <Can> / usePermissions() resolve against /auth/me.
@@ -92,6 +154,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setRole(roleFromUserType(meQuery.data.user.type));
     }
   }, [meQuery.data]);
+
+  // A STORE user can only ever act on their own store — pin the picker to it.
+  useEffect(() => {
+    if (userType === "STORE" && meQuery.data?.store?.id) {
+      setCurrentStoreId(String(meQuery.data.store.id));
+    }
+  }, [userType, meQuery.data?.store?.id]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -137,13 +206,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setLocale: setLocaleState,
       currentStoreId,
       setCurrentStoreId,
-      stores: DEMO_STORES,
+      stores,
       isAuthed,
       authLoading,
       signIn,
       signOut,
     }),
-    [role, theme, locale, currentStoreId, isAuthed, authLoading],
+    [role, theme, locale, currentStoreId, stores, isAuthed, authLoading],
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

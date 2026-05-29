@@ -40,7 +40,7 @@ import {
 } from "@/components/ui/select";
 import { usePermissions } from "@/components/shared/Can";
 import { usePageState } from "@/lib/page-state";
-import { useApp, DEMO_STORES } from "@/lib/app-context";
+import { useApp } from "@/lib/app-context";
 import { useT } from "@/lib/i18n";
 import {
   NOTIF_INBOX,
@@ -340,7 +340,7 @@ interface ComposeForm {
 
 function ComposeTab() {
   const t = useT();
-  const { role } = useApp();
+  const { role, stores } = useApp();
   const { has } = usePermissions();
   const canBroadcast = has("notifications.send_broadcast");
 
@@ -462,7 +462,7 @@ function ComposeTab() {
               </SelectTrigger>
               <SelectContent>
                 {targetType === "Store"
-                  ? DEMO_STORES.map((s) => (
+                  ? stores.map((s) => (
                       <SelectItem key={s.id} value={s.id}>
                         {s.name}
                       </SelectItem>
